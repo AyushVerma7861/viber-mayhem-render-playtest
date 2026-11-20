@@ -32,6 +32,10 @@ const onlineSpectator = element('online-spectator');
 const onlineRematch = element('online-rematch');
 const soundButton = element<HTMLButtonElement>('sound');
 const fullscreenButton = element<HTMLButtonElement>('fullscreen');
+const landscapePrompt = element<HTMLDialogElement>('landscape-prompt');
+const landscapeBack = element<HTMLButtonElement>('landscape-back');
+const landscapeFullscreen = element<HTMLButtonElement>('landscape-fullscreen');
+const landscapeNotice = element('landscape-notice');
 const clock = element('clock');
 const fuse = element('fuse');
 const fuseLabel = element('fuse-label');
@@ -82,8 +86,12 @@ if (kitchen) {
   track.forEach((signal, lane) => { signal.querySelector('b')!.textContent = trackNames[lane].toUpperCase(); });
 }
 const coarse = matchMedia('(any-pointer: coarse)');
+const portrait = matchMedia('(orientation: portrait)');
 const hasTouch = () => coarse.matches || navigator.maxTouchPoints > 0;
+const needsLandscape = () => kitchen && portrait.matches && hasTouch();
 let paused = false;
+let pausedForLandscape = false;
+let landscapeDuringPlay = false;
 let pauseReason = '';
 let graphicsMessage = '';
 let previousFrame = performance.now();
@@ -224,8 +232,8 @@ function input(): Vec {
 }
 
 touch.addEventListener('pointerdown', event => {
+  if (needsLandscape() || finger || event.pointerType === 'mouse') return;
   if (networkFrame) unlockAudio();
-  if (finger || event.pointerType === 'mouse') return;
   event.preventDefault();
   const rect = touch.getBoundingClientRect();
   finger = { id: event.pointerId, x: event.clientX, y: event.clientY };
@@ -338,6 +346,7 @@ function consumeEvents(view: MatchView, localSeat: number, time: number): void {
 
 function setPaused(value: boolean, reason = ''): void {
   if (inHub || networkFrame || (match.phase !== 'play' && match.phase !== 'ready')) return;
+  if (!value && !canPlayInLandscape()) return;
   paused = value;
   pauseReason = value ? reason : '';
   cookerAudio?.setEnabled(sound && !paused);
@@ -353,6 +362,7 @@ function setPaused(value: boolean, reason = ''): void {
 function start(): void {
   if (graphicsMessage) return;
   activateMatch();
+  if (!canPlayInLandscape()) return;
   match.start(match.phase === 'lobby' ? match.seed : newSeed());
   if (kitchen) applyCast();
   yard?.reset();
@@ -371,6 +381,7 @@ function start(): void {
 
 function playFromHub(): void {
   activateMatch();
+  if (!canPlayInLandscape()) return;
   networkFrame = undefined;
   inHub = false;
   hub?.hide();
@@ -390,6 +401,8 @@ function playFromHub(): void {
 
 function returnToHub(): void {
   if (!hub) return;
+  pausedForLandscape = false;
+  closeLandscapePrompt();
   inHub = true;
   cancelAnimationFrame(arenaFrame);
   cookerAudio?.setEnabled(false);
@@ -421,6 +434,7 @@ function showOnlineRound(): void {
   if (wasInHub) arenaFrame = requestAnimationFrame(frame);
   canvas.tabIndex = -1;
   canvas.focus({ preventScroll: true });
+  if (needsLandscape()) syncLandscape();
 }
 
 function showOnlineRoom(): void {
@@ -463,6 +477,7 @@ function receiveSnapshot(snapshot: Snapshot): void {
     if (!document.hidden && online?.connected) onlineMovement.reconcile(snapshot, room.you, now);
     consumeEvents(view, room.you, now);
   }
+  if (view.phase === 'result' && landscapeDuringPlay) closeLandscapePrompt();
 }
 
 const places = ['1st', '2nd', '3rd', '4th'];
@@ -552,7 +567,7 @@ function updateInterface(view: MatchView, localSeat: number, now: number): void 
   onlineSpectator.hidden = !activeOnline || view.phase !== 'play' || view.players[localSeat].alive;
   pauseButton.textContent = paused ? 'Resume' : 'Pause';
   pauseButton.setAttribute('aria-pressed', String(paused));
-  touch.hidden = !hasTouch() || paused || view.phase !== 'play' || !view.players[localSeat].alive ||
+  touch.hidden = !hasTouch() || needsLandscape() || paused || view.phase !== 'play' || !view.players[localSeat].alive ||
     !!graphicsMessage || (activeOnline && (!online?.connected || roomPanel));
   stick.hidden = !coarse.matches && finger === null;
   updateOverlay(view, localSeat, now);
@@ -633,7 +648,7 @@ function frame(now: number): void {
     const { view, time, span, gapMs } = networkFrame;
     const seat = online.state.you;
     const steering = view.phase === 'play' && view.players[seat].alive && online.connected &&
-      !online.showing && !document.hidden && !graphicsMessage;
+      !online.showing && !needsLandscape() && !document.hidden && !graphicsMessage;
     const connection = onlineConnectionMessage || (view.phase !== 'result' && now - time > 650
       ? 'Waiting for the next match update…' : '');
     if (onlineConnection.textContent !== connection) onlineConnection.textContent = connection;
@@ -657,7 +672,7 @@ function frame(now: number): void {
     }
     return;
   }
-  if (!paused && !document.hidden && !graphicsMessage && (match.phase === 'play' || match.phase === 'ready')) {
+  if (!paused && !needsLandscape() && !document.hidden && !graphicsMessage && (match.phase === 'play' || match.phase === 'ready')) {
     if (kitchen) {
       const timing = planFrame(accumulated, elapsed);
       accumulated = timing.remainder;
@@ -739,11 +754,14 @@ soundButton.addEventListener('click', toggleSound);
 const fullscreen = createGameFullscreen(document.documentElement, full => {
   fullscreenButton.setAttribute('aria-pressed', String(full));
   fullscreenButton.textContent = full ? 'Exit fullscreen' : 'Fullscreen';
+  landscapeFullscreen.setAttribute('aria-pressed', String(full));
+  landscapeFullscreen.textContent = fullscreenButton.textContent;
   hub?.setFullscreen(full);
   online?.setFullscreen(full);
   releaseControls();
 }, message => {
-  if (online?.showing) online.showDisplayNotice(message);
+  if (landscapePrompt.open) landscapeNotice.textContent = message.replace(/ ?Rotate your device for landscape\.$/, '');
+  else if (online?.showing) online.showDisplayNotice(message);
   else if (inHub) hub?.showNotice(message);
   else announce(message, performance.now(), 3200);
 });
@@ -751,6 +769,54 @@ function activateMatch(): void {
   unlockAudio();
   if (kitchen) fullscreen.enterOnLaunch();
 }
+function openLandscapePrompt(duringPlay: boolean): void {
+  landscapeDuringPlay = duringPlay;
+  landscapeBack.textContent = duringPlay && networkFrame ? 'Back to Room' :
+    duringPlay && hub ? 'Back to Lobby' : 'Back';
+  if (!landscapePrompt.open) landscapePrompt.showModal();
+}
+function closeLandscapePrompt(): void {
+  if (landscapePrompt.open) landscapePrompt.close();
+  landscapeDuringPlay = false;
+  landscapeNotice.textContent = '';
+}
+function canPlayInLandscape(): boolean {
+  if (!needsLandscape()) return true;
+  openLandscapePrompt(landscapeDuringPlay);
+  return false;
+}
+function syncLandscape(): void {
+  releaseControls();
+  if (!needsLandscape()) {
+    closeLandscapePrompt();
+    if (pausedForLandscape) {
+      pausedForLandscape = false;
+      if (!document.hidden && !graphicsMessage) setPaused(false);
+    }
+    return;
+  }
+  const phase = networkFrame?.view.phase ?? match.phase;
+  if (inHub || online?.showing || (phase !== 'ready' && phase !== 'play')) return;
+  if (!networkFrame && !paused) {
+    setPaused(true);
+    pausedForLandscape = true;
+  }
+  openLandscapePrompt(true);
+}
+function dismissLandscapePrompt(): void {
+  const duringPlay = landscapeDuringPlay;
+  closeLandscapePrompt();
+  if (!duringPlay) return;
+  if (networkFrame) showOnlineRoom();
+  else if (hub) returnToHub();
+  else pausedForLandscape = false;
+}
+landscapePrompt.addEventListener('cancel', event => {
+  event.preventDefault();
+  dismissLandscapePrompt();
+});
+landscapeBack.addEventListener('click', dismissLandscapePrompt);
+landscapeFullscreen.addEventListener('click', fullscreen.toggle);
 fullscreenButton.addEventListener('click', fullscreen.toggle);
 stage.addEventListener('graphics-lost', () => {
   setPaused(true);
@@ -764,16 +830,17 @@ function releaseControls(): void {
   if (networkFrame) online?.sendInput({ x: 0, z: 0 }, performance.now());
 }
 window.addEventListener('blur', releaseControls);
-matchMedia('(orientation: portrait)').addEventListener('change', releaseControls);
+portrait.addEventListener('change', syncLandscape);
+coarse.addEventListener('change', syncLandscape);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) return;
   if (networkFrame) releaseControls();
   else setPaused(true);
 });
 window.addEventListener('keydown', event => {
-  if (inHub || online?.showing || event.altKey || event.ctrlKey || event.metaKey) return;
+  if (inHub || landscapePrompt.open || online?.showing || event.altKey || event.ctrlKey || event.metaKey) return;
   const phase = networkFrame?.view.phase ?? match.phase;
-  if (movement[event.code] && phase === 'play' && !paused && (!networkFrame || online?.connected)) {
+  if (movement[event.code] && phase === 'play' && !paused && !needsLandscape() && (!networkFrame || online?.connected)) {
     event.preventDefault();
     if (networkFrame && !event.repeat) unlockAudio();
     held.add(event.code);
@@ -795,6 +862,7 @@ if (usesHub) {
     cover: kitchenCover,
     selected: () => selected,
     activate: activateMatch,
+    canPlay: canPlayInLandscape,
     toggleFullscreen: fullscreen.toggle,
     room(state) {
       if (state.phase !== 'waiting' || !networkFrame) return;

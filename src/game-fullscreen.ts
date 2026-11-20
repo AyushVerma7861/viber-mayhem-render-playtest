@@ -17,8 +17,9 @@ export function createGameFullscreen(
   showNotice: (message: string) => void,
 ) {
   const page: FullscreenDocument = document;
-  const touch = matchMedia('(pointer: coarse)');
+  const touch = matchMedia('(any-pointer: coarse)');
   const portrait = matchMedia('(orientation: portrait)');
+  const hasTouch = () => touch.matches || navigator.maxTouchPoints > 0;
   const orientation: LockableOrientation | undefined = screen.orientation;
   const fullscreenElement = () => page.fullscreenElement ?? page.webkitFullscreenElement;
   const rotateHint = 'Rotate your device for landscape.';
@@ -28,7 +29,7 @@ export function createGameFullscreen(
   let requestedLandscape = false;
 
   async function lockLandscape() {
-    if (!touch.matches) return;
+    if (!hasTouch()) return;
     if (orientation?.lock) {
       requestedLandscape = true;
       try {
@@ -55,7 +56,7 @@ export function createGameFullscreen(
 
   function unavailable(manual: boolean) {
     queueMicrotask(() => {
-      const canRotate = touch.matches && portrait.matches;
+      const canRotate = hasTouch() && portrait.matches;
       if (manual) showNotice('Fullscreen is unavailable here.' + (canRotate ? ' ' + rotateHint : ''));
       else if (canRotate) showNotice(rotateHint);
     });

@@ -21,6 +21,7 @@ type Callbacks = {
   cover: string;
   selected(): Viber;
   activate(): void;
+  canPlay(): boolean;
   toggleFullscreen(): void;
   room(view: RoomView): void;
   snapshot(snapshot: Snapshot): void;
@@ -619,6 +620,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
       render();
       get('[data-leave-room]').focus();
     } else if (!room || view?.phase !== 'waiting') {
+      if (view?.phase === 'playing' && !callbacks.canPlay()) return;
       if (busy) {
         attempt++;
         busy = false;
@@ -680,6 +682,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
   roomAction.addEventListener('click', () => {
     if (!view) return;
     callbacks.activate();
+    const cancellingReady = view.phase === 'waiting' && view.you !== view.host && view.seats[view.you].ready;
+    if (view.phase !== 'results' && !cancellingReady && !callbacks.canPlay()) return;
     if (view.phase !== 'waiting') {
       close();
     } else if (view.you === view.host) {
@@ -708,7 +712,9 @@ export function createOnlineRooms(callbacks: Callbacks) {
     get('[data-keep-seat]').focus();
   });
   get('[data-confirm-leave]').addEventListener('click', leave);
-  get('[data-keep-seat]').addEventListener('click', close);
+  get('[data-keep-seat]').addEventListener('click', () => {
+    if (view?.phase !== 'playing' || callbacks.canPlay()) close();
+  });
 
   return {
     open, close,
@@ -736,6 +742,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
     },
     rematch() {
       if (!view) return;
+      const cancellingReady = view.you !== view.host && view.seats[view.you].ready;
+      if (!cancellingReady && !callbacks.canPlay()) return;
       if (view.you === view.host) message('start');
       else message('ready', !view.seats[view.you].ready);
     },

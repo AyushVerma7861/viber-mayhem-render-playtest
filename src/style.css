@@ -21,6 +21,22 @@ button:disabled { opacity: .42; cursor: default; }
   color: #ffe6b5; font-weight: 800; text-align: center;
 }
 #game-loading:has(noscript > span) > span { display: none; }
+#landscape-prompt {
+  width: min(calc(100% - 28px), 390px); max-height: calc(100dvh - 28px);
+  padding: 24px; margin: auto; overflow: auto; text-align: center;
+  border: 1px solid #ba8a54; border-radius: 18px; background: #322421; color: #fff0da;
+  box-shadow: 0 20px 70px #100805b0;
+}
+#landscape-prompt::backdrop { background: #1f1512f5; }
+#landscape-prompt h2 { margin: 0 0 8px; font-size: clamp(1.45rem, 5vw, 2rem); }
+#landscape-prompt p { margin: 0 0 15px; color: #f2dec5; }
+#landscape-notice:empty { display: none; }
+.landscape-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.landscape-actions button {
+  min-height: 44px; padding: 6px 14px; border: 1px solid #a57965;
+  border-radius: 9px; background: #4a332c; color: #fff0d9; font-weight: 800;
+}
+#landscape-fullscreen { border-color: #ffdb96; background: #ffc368; color: #301b10; }
 #shell { min-height: 100dvh; background: radial-gradient(ellipse at 35% 0%, #1a2730 0%, #0c1219 58%); }
 .topbar {
   min-height: 68px; padding: 0 max(24px, calc((100vw - 1340px)/2));
