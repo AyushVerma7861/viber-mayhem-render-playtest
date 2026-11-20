@@ -1,6 +1,7 @@
 import type { MatchView, Vec } from './simulation.ts';
 
 export const ROOM_TYPE = 'let_them_cook';
+export const ROOM_SERVER_BUSY = 503;
 export const SEAT_COUNT = 4;
 export const RECONNECT_SECONDS = 20;
 export const SNAPSHOT_TICKS = 3;

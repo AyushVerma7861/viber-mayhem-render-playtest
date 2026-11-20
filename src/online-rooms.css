@@ -53,7 +53,13 @@
   border-color: #ffdb9b;
   color: #2c190e;
 }
-.online-hero [data-close-online] { align-self: flex-start; min-width: 44px; background: #2c1c19eb; font-size: 1.35rem; }
+.online-hero-actions { display: flex; align-self: flex-start; gap: 5px; }
+.online-hero-actions button { display: grid; place-items: center; min-width: 44px; background: #2c1c19eb; }
+.online-hero [data-close-online] { font-size: 1.35rem; }
+.online-hero [data-online-fullscreen][aria-pressed="true"] { border-color: #ffcf82; color: #ffcf82; }
+.online-hero [data-cancel-entry] { font-size: .88rem; }
+.online-display-notice { margin: 9px 20px 0; color: #ffe0a7; font-size: .85rem; }
+.online-display-notice:empty { display: none; }
 .online-room > section { padding: 16px 20px; }
 .online-entry-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .online-entry-card, .online-invite {
@@ -154,6 +160,7 @@
 .online-actions .online-gold { min-width: min(140px, 100%); }
 .online-notice:empty { display: none; }
 .online-notice { margin: 0 20px 12px; color: #ffe0a7; font-size: .84rem; overflow-wrap: anywhere; }
+.online-room .online-sync-retry { margin: 0 20px 12px; }
 .online-confirm p { color: #ead1bb; font-size: .93rem; }
 .online-confirm div { display: flex; justify-content: flex-end; gap: 8px; }
 #online-connection, #online-spectator {
@@ -190,7 +197,8 @@
   .online-entry-options, .online-party-grid { grid-template-columns: minmax(0, 1fr); }
   .online-invite { grid-template-columns: max-content minmax(0, 1fr); align-items: center; }
   .online-share-actions, .online-manual { grid-column: 1 / -1; }
-  .online-notice { margin-inline: 12px; }
+  .online-notice, .online-display-notice { margin-inline: 12px; }
+  .online-room .online-sync-retry { margin-inline: 12px; }
 }
 @media (max-height: 430px) and (orientation: landscape) {
   .online-hero { min-height: 66px; padding-block: 8px; }

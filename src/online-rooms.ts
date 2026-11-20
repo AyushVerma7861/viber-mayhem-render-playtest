@@ -1,7 +1,7 @@
 import './online-rooms.css';
-import { Client } from '@colyseus/sdk';
+import { Client, MatchMakeError } from '@colyseus/sdk';
 import type { Room } from '@colyseus/sdk';
-import { RECONNECT_SECONDS, ROOM_TYPE } from './online-protocol.ts';
+import { RECONNECT_SECONDS, ROOM_SERVER_BUSY, ROOM_TYPE } from './online-protocol.ts';
 import type { RoomView, Snapshot } from './online-protocol.ts';
 import { parseRegionDirectory, preferredRegion, readRoomRoute } from './online-regions.ts';
 import type { GameRegion, RegionDirectory, RoomRoute } from './online-regions.ts';
@@ -10,12 +10,18 @@ import { VIBERS } from './vibers.ts';
 import type { Viber } from './vibers.ts';
 
 const SESSION = 'viber-mayhem:online-seat';
+const PING_TIMEOUT = 2200;
+const PING_MAX_AGE = 60000;
+const WAKE_TIMEOUT = 70000;
+const SYNC_INTERVAL = 1000;
+const SYNC_ATTEMPTS = 5;
 export const onlineEnabled = document.documentElement.hasAttribute('data-online');
 
 type Callbacks = {
   cover: string;
   selected(): Viber;
   activate(): void;
+  toggleFullscreen(): void;
   room(view: RoomView): void;
   snapshot(snapshot: Snapshot): void;
   connection(message: string): void;
@@ -39,8 +45,12 @@ export function createOnlineRooms(callbacks: Callbacks) {
     <header class="online-hero">
       <img alt="" draggable="false">
       <div><p data-room-region>LET THEM COOK</p><h2 id="online-room-title">Online Rooms</h2></div>
-      <button type="button" data-close-online aria-label="Close Online Rooms">×</button>
+      <div class="online-hero-actions">
+        <button type="button" data-online-fullscreen aria-label="Fullscreen" aria-pressed="false" title="Fullscreen"><span class="hub-expand" aria-hidden="true"></span></button>
+        <button type="button" data-close-online aria-label="Close Online Rooms">×</button>
+      </div>
     </header>
+    <p class="online-display-notice" data-display-notice role="status"></p>
     <section data-room-entry>
       <div class="online-entry-options">
         <div class="online-entry-card">
@@ -51,6 +61,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
             <select aria-describedby="online-region-help"><option value="">Auto</option></select>
           </label>
           <p id="online-region-help" role="status" hidden></p>
+          <button type="button" data-retry-pings hidden>Retry pings</button>
           <button type="button" class="online-gold" data-create-room>Create private room</button>
         </div>
         <form class="online-entry-card" data-join-room>
@@ -92,6 +103,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
       </footer>
     </section>
     <p class="online-notice" role="status" data-room-notice></p>
+    <button type="button" class="online-sync-retry" data-retry-sync hidden>Retry room sync</button>
     <section class="online-confirm" aria-labelledby="online-confirm-title" hidden>
       <h3 id="online-confirm-title">Leave this match?</h3>
       <p>You’ll give up your seat. The round continues for the party.</p>
@@ -106,10 +118,13 @@ export function createOnlineRooms(callbacks: Callbacks) {
   const codeInput = get<HTMLInputElement>('#online-code');
   const tiles = get('.online-seats');
   const closeButton = get<HTMLButtonElement>('[data-close-online]');
+  const fullscreenButton = get<HTMLButtonElement>('[data-online-fullscreen]');
   const manualInvite = get('[data-manual-invite]');
   const shareButton = get<HTMLButtonElement>('[data-share-invite]');
   const regionChoice = get<HTMLSelectElement>('.online-region select');
   const regionHelp = get('#online-region-help');
+  const retryPings = get<HTMLButtonElement>('[data-retry-pings]');
+  const retrySync = get<HTMLButtonElement>('[data-retry-sync]');
   const confirm = get('[data-keep-seat]').closest<HTMLElement>('section')!;
   get<HTMLImageElement>('.online-hero img').src = callbacks.cover;
   shareButton.hidden = typeof navigator.share !== 'function';
@@ -118,6 +133,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
   let busy = false;
   let connected = false;
   let awaitingSnapshot = false;
+  let syncStalled = false;
+  let syncTimer: number | undefined;
   let attempt = 0;
   let sequence = 0;
   let lastInputAt = -Infinity;
@@ -125,10 +142,12 @@ export function createOnlineRooms(callbacks: Callbacks) {
   let frameTick = -1;
   let connectionMessage = '';
   let reconnectTimer: number | undefined;
+  let displayNoticeTimer: number | undefined;
   let directory: RegionDirectory = {
     home: 'local', regions: [{ id: 'local', label: 'Local server', origin: location.origin }],
   };
   let configuredDirectory = false;
+  let directoryLoaded = false;
   let directoryRequest: Promise<void> | undefined;
   const pings = new Map<string, number | null>();
   let pingRequest: Promise<void> | undefined;
@@ -165,7 +184,10 @@ export function createOnlineRooms(callbacks: Callbacks) {
     const timeout = window.setTimeout(() => controller.abort(), 2500);
     try {
       const response = await fetch('/regions.json', { cache: 'no-store', signal: controller.signal });
-      const configured = response.ok ? parseRegionDirectory(await response.json()) : undefined;
+      if (!response.ok) return;
+      const data: unknown = await response.json();
+      const configured = parseRegionDirectory(data);
+      directoryLoaded = data === null || !!configured;
       if (!configured) return;
       directory = configured;
       configuredDirectory = true;
@@ -176,7 +198,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
   }
 
   function loadDirectory() {
-    return directoryRequest ??= fetchDirectory();
+    if (directoryLoaded) return Promise.resolve();
+    return directoryRequest ??= fetchDirectory().finally(() => { directoryRequest = undefined; });
   }
 
   function updateRegionLabels() {
@@ -190,18 +213,21 @@ export function createOnlineRooms(callbacks: Callbacks) {
       const ping = pings.get(region.id);
       option.textContent = region.label + (ping === undefined ? ' · checking…' : ping === null ? ' · no reply' : ' · ' + ping + ' ms');
     }
-    const noReply = finished && fastest === null;
-    regionHelp.hidden = !noReply;
-    if (noReply) regionHelp.textContent = 'No ping reply yet. A server may be waking up.';
+    const missed = finished && directory.regions.some(region => pings.get(region.id) === null);
+    regionHelp.hidden = retryPings.hidden = !missed;
+    if (missed) regionHelp.textContent = 'Some servers may be waking up. You can retry their pings.';
   }
 
-  function checkPing() {
-    if (directory.regions.length < 2 || pingRequest || performance.now() - lastPingAt < 60000) return pingRequest;
-    pings.clear();
+  function checkPing(retry = false) {
+    if (directory.regions.length < 2 || pingRequest || !retry && performance.now() - lastPingAt < PING_MAX_AGE) return pingRequest;
+    const regions = retry && performance.now() - lastPingAt < PING_MAX_AGE
+      ? directory.regions.filter(region => pings.get(region.id) === null)
+      : directory.regions;
+    for (const region of regions) pings.delete(region.id);
     updateRegionLabels();
-    pingRequest = Promise.all(directory.regions.map(async region => {
+    pingRequest = Promise.all(regions.map(async region => {
       try {
-        pings.set(region.id, Math.round(await new Client(region.origin).getLatency({ pingCount: 3, timeout: 2200 })));
+        pings.set(region.id, Math.round(await new Client(region.origin).getLatency({ pingCount: 3, timeout: PING_TIMEOUT })));
       } catch { pings.set(region.id, null); }
       updateRegionLabels();
     })).then(() => {
@@ -209,6 +235,22 @@ export function createOnlineRooms(callbacks: Callbacks) {
       pingRequest = undefined;
     });
     return pingRequest;
+  }
+
+  async function waitForRegion(client: Client, region: GameRegion, current: number) {
+    if (pings.get(region.id) != null && performance.now() - lastPingAt < PING_MAX_AGE) return true;
+    const deadline = performance.now() + WAKE_TIMEOUT;
+    while (current === attempt && performance.now() < deadline) {
+      try {
+        await client.getLatency({ timeout: PING_TIMEOUT });
+        return current === attempt;
+      } catch {
+        if (current !== attempt || !navigator.onLine) return false;
+        notice('Waiting for ' + region.label + ' to wake up… This can take about a minute.');
+        await new Promise(resolve => window.setTimeout(resolve, 2000));
+      }
+    }
+    return false;
   }
 
   function roomCode(code: string, region: GameRegion | undefined = activeRegion): string {
@@ -222,7 +264,10 @@ export function createOnlineRooms(callbacks: Callbacks) {
   }
 
   function invite(code: string) {
-    const url = new URL(location.pathname, location.origin);
+    const hasRegionEntry = configuredDirectory && directory.regions.some(region => region.origin === location.origin);
+    const url = hasRegionEntry && activeRegion
+      ? new URL('/', activeRegion.origin)
+      : new URL(location.pathname, location.origin);
     url.searchParams.set('room', code);
     if (configuredDirectory && activeRegion) url.searchParams.set('region', activeRegion.id);
     return url.href;
@@ -238,14 +283,21 @@ export function createOnlineRooms(callbacks: Callbacks) {
   }
 
   function render() {
-    get('[data-room-entry]').hidden = !!view || !confirm.hidden;
-    get('[data-room-party]').hidden = !view || !confirm.hidden;
+    const entry = get('[data-room-entry]');
+    const party = get('[data-room-party]');
+    const enteredRoom = !entry.hidden && party.hidden && !!view && confirm.hidden;
+    entry.hidden = !!view || !confirm.hidden;
+    party.hidden = !view || !confirm.hidden;
     get('[data-room-notice]').hidden = !confirm.hidden;
     get('h2').textContent = view ? 'Private room' : 'Online Rooms';
-    closeButton.hidden = !!room && (!view || view.phase === 'waiting') && confirm.hidden;
-    closeButton.setAttribute('aria-label', view ? 'Close room panel' : busy ? 'Cancel room connection' : 'Close Online Rooms');
-    createButton.disabled = codeInput.disabled = get<HTMLButtonElement>('[type="submit"]').disabled = busy;
-    regionChoice.disabled = busy;
+    closeButton.hidden = view?.phase === 'waiting' && confirm.hidden;
+    closeButton.setAttribute('aria-label', view ? 'Close room panel' :
+      busy || room ? 'Cancel room connection' : 'Close Online Rooms');
+    closeButton.textContent = !view && (busy || room) ? 'Cancel' : '×';
+    closeButton.toggleAttribute('data-cancel-entry', !view && (busy || !!room));
+    createButton.disabled = codeInput.disabled = get<HTMLButtonElement>('[type="submit"]').disabled = busy || !!room && !view;
+    regionChoice.disabled = retryPings.disabled = busy;
+    retrySync.hidden = !syncStalled || !confirm.hidden;
     showRoomRegion();
     if (!view) return;
     const state = view;
@@ -261,11 +313,19 @@ export function createOnlineRooms(callbacks: Callbacks) {
     get('[data-room-pick]').hidden = !selecting;
     get('[data-room-guide]').hidden = !selecting;
     if (!selecting) manualInvite.hidden = true;
-    const focused = tiles.contains(document.activeElement)
-      ? (document.activeElement as HTMLElement).dataset.onlineViber : undefined;
-    tiles.replaceChildren(...state.seats.map((seat, index) => {
+    const focused = tiles.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
+    state.seats.forEach((seat, index) => {
+      const isYou = index === state.you;
+      const canPick = selecting && seat.kind === 'bot' && connected;
+      const roleText = seat.kind === 'bot' ? 'Bot' : seat.kind === 'away' ? 'Reconnecting' : seat.kind === 'left' ? 'Left' :
+        index === state.host ? (isYou ? 'You · Host' : 'Host') :
+          isYou ? (seat.ready ? 'You · Ready' : 'You') : seat.ready ? 'Ready' : selecting ? 'Picking a Viber' : 'Player';
+      const key = JSON.stringify([seat.viber, seat.kind, seat.ready, isYou, canPick, roleText]);
+      const previous = tiles.children[index] as HTMLElement | undefined;
+      if (previous?.dataset.seatState === key) return;
       const tile = document.createElement('li');
-      tile.toggleAttribute('data-you', index === state.you);
+      tile.dataset.seatState = key;
+      tile.toggleAttribute('data-you', isYou);
       tile.dataset.kind = seat.kind;
       tile.style.setProperty('--seat-accent', VIBERS[seat.viber].color);
       const picture = new Image();
@@ -275,11 +335,9 @@ export function createOnlineRooms(callbacks: Callbacks) {
       const name = document.createElement('strong');
       name.textContent = viber.name;
       const role = document.createElement('span');
-      role.textContent = seat.kind === 'bot' ? 'Bot' : seat.kind === 'away' ? 'Reconnecting' : seat.kind === 'left' ? 'Left' :
-        index === state.host ? (index === state.you ? 'You · Host' : 'Host') :
-          index === state.you ? (seat.ready ? 'You · Ready' : 'You') : seat.ready ? 'Ready' : selecting ? 'Picking a Viber' : 'Player';
+      role.textContent = roleText;
       tile.toggleAttribute('data-ready', seat.ready);
-      if (selecting && seat.kind === 'bot' && connected) {
+      if (canPick) {
         const button = document.createElement('button');
         button.type = 'button';
         button.dataset.onlineViber = String(seat.viber);
@@ -288,8 +346,9 @@ export function createOnlineRooms(callbacks: Callbacks) {
         button.addEventListener('click', () => message('viber', seat.viber));
         tile.append(button);
       } else tile.append(picture, name, role);
-      return tile;
-    }));
+      if (previous) previous.replaceWith(tile);
+      else tiles.append(tile);
+    });
     const phase = get('[data-room-phase]');
     const nextPhase = connectionMessage || (selecting
       ? isHost ? wait || (people === 1 ? 'Invite friends or start with bots.' : 'Your party is ready.') :
@@ -303,8 +362,11 @@ export function createOnlineRooms(callbacks: Callbacks) {
     const reopen = get<HTMLButtonElement>('[data-reopen-room]');
     reopen.hidden = state.phase !== 'results' || !isHost;
     reopen.disabled = !connected;
-    if (focused !== undefined) {
-      const button = tiles.querySelector<HTMLButtonElement>('[data-online-viber="' + focused + '"]');
+    if (enteredRoom && dialog.open && selecting) {
+      (isHost ? get('[data-copy-invite]') : roomAction).focus();
+    }
+    if (focused && !focused.isConnected) {
+      const button = tiles.querySelector<HTMLButtonElement>('[data-online-viber="' + focused.dataset.onlineViber + '"]');
       (button ?? (roomAction.disabled ? tiles.querySelector('button') ?? get('[data-leave-room]') : roomAction))
         .focus({ preventScroll: true });
     }
@@ -324,6 +386,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
 
   function close() {
     confirm.hidden = true;
+    window.clearTimeout(displayNoticeTimer);
+    get('[data-display-notice]').textContent = '';
     if (dialog.open) dialog.close();
   }
 
@@ -340,7 +404,6 @@ export function createOnlineRooms(callbacks: Callbacks) {
     activeRegion = region;
     activePing = undefined;
     connected = false;
-    awaitingSnapshot = true;
     joined.reconnection.minUptime = 0;
     joined.reconnection.maxDelay = 1500;
     joined.reconnection.maxEnqueuedMessages = 0;
@@ -348,7 +411,6 @@ export function createOnlineRooms(callbacks: Callbacks) {
     frameTick = -1;
     saveSeat(joined, region);
     updateAddress(joined.roomId);
-    updateConnection('Syncing room…');
     joined.onMessage('room', (state: RoomView) => {
       if (room !== joined) return;
       if (state.phase !== view?.phase) notice('');
@@ -359,7 +421,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
       }
       view = state;
       if (awaitingSnapshot && state.phase === 'waiting') finishSync();
-      render();
+      else render();
       callbacks.room(state);
     });
     joined.onMessage('notice', (message: string) => {
@@ -380,6 +442,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
       connected = false;
       activePing = undefined;
       awaitingSnapshot = false;
+      stopSync();
       window.clearInterval(reconnectTimer);
       const expires = performance.now() + RECONNECT_SECONDS * 1000;
       const update = () => {
@@ -392,11 +455,9 @@ export function createOnlineRooms(callbacks: Callbacks) {
     });
     joined.onReconnect(() => {
       if (room !== joined) return;
-      awaitingSnapshot = true;
       window.clearInterval(reconnectTimer);
       saveSeat(joined, region);
-      updateConnection('Syncing match…');
-      joined.send('sync');
+      beginSync(joined);
     });
     joined.onLeave(() => {
       if (room !== joined) return;
@@ -408,10 +469,37 @@ export function createOnlineRooms(callbacks: Callbacks) {
       notice('Connection lost. Try the same room code, or start a new room.');
       codeInput.focus();
     });
-    joined.send('sync');
+    beginSync(joined);
+  }
+
+  function stopSync() {
+    window.clearTimeout(syncTimer);
+    syncStalled = false;
+  }
+
+  function beginSync(joined: Room) {
+    stopSync();
+    awaitingSnapshot = true;
+    updateConnection(view ? 'Syncing match…' : 'Syncing room…');
+    render();
+    let sends = 0;
+    const send = () => {
+      if (room !== joined || !awaitingSnapshot) return;
+      if (sends === SYNC_ATTEMPTS) {
+        syncStalled = true;
+        updateConnection(dialog.open ? 'Room sync stalled. Retry to continue.' : 'Room sync stalled. Open Room to retry.');
+        render();
+        return;
+      }
+      sends++;
+      joined.send('sync');
+      syncTimer = window.setTimeout(send, SYNC_INTERVAL);
+    };
+    send();
   }
 
   function finishSync() {
+    stopSync();
     awaitingSnapshot = false;
     connected = true;
     notice('');
@@ -426,6 +514,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
   }
 
   function forget() {
+    stopSync();
     room = undefined;
     view = undefined;
     connected = false;
@@ -434,6 +523,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
     awaitingSnapshot = false;
     confirm.hidden = true;
     manualInvite.hidden = true;
+    tiles.replaceChildren();
     window.clearInterval(reconnectTimer);
     storage('');
     updateAddress();
@@ -458,12 +548,17 @@ export function createOnlineRooms(callbacks: Callbacks) {
     busy = true;
     const current = ++attempt;
     open();
+    if (!fromInvite) callbacks.activate();
     notice(input === undefined ? 'Finding a server…' : 'Opening room…');
     const viber = VIBERS.indexOf(callbacks.selected());
     let reconnect: string | undefined;
     try {
       await loadDirectory();
       if (current !== attempt) return;
+      if (input && !directoryLoaded) {
+        await loadDirectory();
+        if (current !== attempt) return;
+      }
       const route = input === undefined ? undefined : readRoomRoute(input, directory);
       if (input !== undefined && !route) {
         notice(fromInvite ? 'This invite is incomplete or its server is unavailable. Ask your friend for a new link or room code.' :
@@ -474,9 +569,16 @@ export function createOnlineRooms(callbacks: Callbacks) {
       if (!route && !selected) await checkPing();
       if (current !== attempt) return;
       const region = route?.region ?? selected ?? preferredRegion(directory, pings);
-      const client = new Client(region.origin);
       reconnect = route && reconnectToken(route);
+      const client = new Client(region.origin, {
+        fetchFn: (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(reconnect ? 3500 : 10000) }),
+      });
       if (route) codeInput.value = roomCode(route.code, region);
+      if (!reconnect && !await waitForRegion(client, region, current)) {
+        if (current === attempt) notice('The game server did not answer. Try again or choose another region.');
+        return;
+      }
+      if (current !== attempt) return;
       notice(reconnect ? 'Rejoining your room…' : route ? 'Joining room…' : 'Creating room…');
       let joined: Room | undefined;
       if (reconnect) {
@@ -489,12 +591,15 @@ export function createOnlineRooms(callbacks: Callbacks) {
       if (!joined) return;
       if (current === attempt) attach(joined, region);
       else void joined.leave().catch(() => {});
-    } catch {
+    } catch (error) {
       if (current !== attempt) return;
       if (reconnect) storage('');
-      notice(reconnect ? 'Your saved seat expired. Try joining the room again.' :
-        input !== undefined ? 'Could not join. The server may be waking up, or the room may be full, closed, or in a match.' :
-          'Could not create a room. Check your connection and try again.');
+      if (reconnect) notice('Could not restore your seat. Try joining the room again.');
+      else if (error instanceof MatchMakeError && error.code === ROOM_SERVER_BUSY) {
+        notice('This server is busy. Try again soon or choose another region.');
+      } else if (input !== undefined) {
+        notice('Could not join. Check your connection or ask the host if the room is still open.');
+      } else notice('Could not create a room. Check your connection and try again.');
     } finally {
       if (current === attempt) {
         busy = false;
@@ -513,7 +618,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
       confirm.hidden = true;
       render();
       get('[data-leave-room]').focus();
-    } else if (!room || view && view.phase !== 'waiting') {
+    } else if (!room || view?.phase !== 'waiting') {
       if (busy) {
         attempt++;
         busy = false;
@@ -521,6 +626,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
         notice('');
         render();
       }
+      if (room && !view) leave();
       if (!room) {
         updateAddress();
         notice('');
@@ -530,7 +636,10 @@ export function createOnlineRooms(callbacks: Callbacks) {
   }
 
   closeButton.addEventListener('click', dismiss);
+  fullscreenButton.addEventListener('click', callbacks.toggleFullscreen);
   dialog.addEventListener('cancel', event => { event.preventDefault(); dismiss(); });
+  retryPings.addEventListener('click', () => void checkPing(true));
+  retrySync.addEventListener('click', () => { if (room) beginSync(room); });
   createButton.addEventListener('click', () => void enter());
   form.addEventListener('submit', event => {
     event.preventDefault();
@@ -599,10 +708,22 @@ export function createOnlineRooms(callbacks: Callbacks) {
     get('[data-keep-seat]').focus();
   });
   get('[data-confirm-leave]').addEventListener('click', leave);
-  get('[data-keep-seat]').addEventListener('click', dismiss);
+  get('[data-keep-seat]').addEventListener('click', close);
 
   return {
     open, close,
+    setFullscreen(active: boolean) {
+      const label = active ? 'Exit fullscreen' : 'Fullscreen';
+      fullscreenButton.setAttribute('aria-pressed', String(active));
+      fullscreenButton.setAttribute('aria-label', label);
+      fullscreenButton.title = label;
+    },
+    showDisplayNotice(message: string) {
+      const tip = get('[data-display-notice]');
+      tip.textContent = message;
+      window.clearTimeout(displayNoticeTimer);
+      displayNoticeTimer = window.setTimeout(() => { tip.textContent = ''; }, 4200);
+    },
     get state() { return view; },
     get connected() { return connected; },
     get showing() { return dialog.open; },

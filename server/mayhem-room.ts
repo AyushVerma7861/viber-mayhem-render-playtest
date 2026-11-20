@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { Room } from '@colyseus/core';
+import { Room, ServerError } from '@colyseus/core';
 import type { Client } from '@colyseus/core';
 import { KITCHEN_ARENA } from '../src/arena.ts';
 import { HZ, Match } from '../src/simulation.ts';
 import type { MatchView } from '../src/simulation.ts';
-import { RECONNECT_SECONDS, SEAT_COUNT, SNAPSHOT_TICKS } from '../src/online-protocol.ts';
+import { RECONNECT_SECONDS, ROOM_SERVER_BUSY, SEAT_COUNT, SNAPSHOT_TICKS } from '../src/online-protocol.ts';
 import type { AppliedInput, OnlineInput, RoomPhase, RoomView, Snapshot } from '../src/online-protocol.ts';
 
 type Seat = {
@@ -20,6 +20,11 @@ type Seat = {
 const TICK_MS = 1000 / HZ;
 const MAX_CATCH_UP_STEPS = 24;
 const STALE_INPUT_MS = 450;
+const MAX_ROOMS = Number(process.env.MAYHEM_MAX_ROOMS ?? 8);
+if (!Number.isSafeInteger(MAX_ROOMS) || MAX_ROOMS < 1) throw new Error('MAYHEM_MAX_ROOMS must be a positive integer.');
+const ROOM_CREATION_WINDOW_MS = 10000;
+const roomCreations: number[] = [];
+let activeRooms = 0;
 const numberInRange = (v: unknown, max: number): v is number =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v < max;
 
@@ -38,17 +43,41 @@ export class MayhemRoom extends Room {
   private lastUpdate = 0;
   private lastSnapshot = 0;
   private events: MatchView['events'][number][] = [];
+  private admitted = false;
 
   async onCreate() {
-    this.roomId = randomBytes(9).toString('base64url');
-    await this.setPrivate(true);
-    this.onMessage('sync', client => this.sync(client));
-    this.onMessage('viber', (client, value: unknown) => this.selectViber(client, value));
-    this.onMessage('ready', (client, value: unknown) => this.ready(client, value));
-    this.onMessage('start', client => this.startRound(client));
-    this.onMessage('waiting', client => this.openWaitingRoom(client));
-    this.onMessage('input', (client, value: unknown) => this.acceptInput(client, value));
-    this.setSimulationInterval(() => this.advance(), TICK_MS);
+    const now = performance.now();
+    while (roomCreations.length && roomCreations[0] <= now - ROOM_CREATION_WINDOW_MS) roomCreations.shift();
+    if (activeRooms >= MAX_ROOMS || roomCreations.length >= MAX_ROOMS * 2) {
+      throw new ServerError(ROOM_SERVER_BUSY, 'This server is busy. Try again soon or choose another region.');
+    }
+    activeRooms++;
+    roomCreations.push(now);
+    this.admitted = true;
+    try {
+      this.roomId = randomBytes(9).toString('base64url');
+      await this.setPrivate(true);
+      this.onMessage('sync', client => this.sync(client));
+      this.onMessage('viber', (client, value: unknown) => this.selectViber(client, value));
+      this.onMessage('ready', (client, value: unknown) => this.ready(client, value));
+      this.onMessage('start', client => this.startRound(client));
+      this.onMessage('waiting', client => this.openWaitingRoom(client));
+      this.onMessage('input', (client, value: unknown) => this.acceptInput(client, value));
+      this.setSimulationInterval(() => this.advance(), TICK_MS);
+    } catch (error) {
+      this.releaseAdmission();
+      throw error;
+    }
+  }
+
+  onDispose() {
+    this.releaseAdmission();
+  }
+
+  private releaseAdmission() {
+    if (!this.admitted) return;
+    this.admitted = false;
+    activeRooms--;
   }
 
   onAuth() {

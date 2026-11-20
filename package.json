@@ -8,8 +8,8 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build && node tools/standalone.mjs",
-    "build:online": "tsc --noEmit && vite build --outDir online-dist",
+    "build": "npm run build:online",
+    "build:online": "tsc --noEmit && vite build --mode online --outDir online-dist",
     "online": "node server/index.ts",
     "preview": "vite preview --host 127.0.0.1",
     "test": "node --test test/simulation.test.ts test/kitchen.test.ts test/frame-clock.test.ts test/online-movement.test.ts test/online-regions.test.ts"

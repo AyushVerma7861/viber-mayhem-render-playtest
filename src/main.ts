@@ -1,5 +1,6 @@
 import './style.css';
 import { planFrame } from './frame-clock.ts';
+import { createGameFullscreen } from './game-fullscreen.ts';
 import { CookerAudio } from './cooker-audio.ts';
 import { COOKER_ICON, makeCookerPanel } from './cooker-feedback.ts';
 import { createHub, readHubPreferences, saveHubPreference } from './hub.ts';
@@ -11,7 +12,7 @@ import { CAST, FUSE_TICKS, HZ, Match, OFFLINE_SEAT, STEP } from './simulation.ts
 import type { MatchView, Vec } from './simulation.ts';
 import { YardView } from './scene.ts';
 import { VIBERS, viberParty } from './vibers.ts';
-import kitchenCover from './assets/let-them-cook-cover.webp?inline';
+import kitchenCover from './assets/let-them-cook-cover.webp';
 
 function element<T extends HTMLElement = HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -351,7 +352,7 @@ function setPaused(value: boolean, reason = ''): void {
 
 function start(): void {
   if (graphicsMessage) return;
-  unlockAudio();
+  activateMatch();
   match.start(match.phase === 'lobby' ? match.seed : newSeed());
   if (kitchen) applyCast();
   yard?.reset();
@@ -369,6 +370,7 @@ function start(): void {
 }
 
 function playFromHub(): void {
+  activateMatch();
   networkFrame = undefined;
   inHub = false;
   hub?.hide();
@@ -734,32 +736,22 @@ function toggleSound(): void {
   if (sound && !inHub) unlockAudio();
 }
 soundButton.addEventListener('click', toggleSound);
-async function toggleFullscreen(): Promise<void> {
-  const target = usesHub ? document.documentElement : shell;
-  const message = (text: string) => {
-    if (inHub) hub?.showNotice(text);
-    else announce(text, performance.now(), 2500);
-  };
-  try {
-    if (document.fullscreenElement) {
-      await document.exitFullscreen();
-    } else if (target.requestFullscreen) {
-      await target.requestFullscreen();
-    } else {
-      message('Use your browser menu for fullscreen');
-    }
-  } catch {
-    message('Fullscreen is unavailable here');
-  }
-}
-fullscreenButton.addEventListener('click', toggleFullscreen);
-document.addEventListener('fullscreenchange', () => {
-  const full = !!document.fullscreenElement;
+const fullscreen = createGameFullscreen(document.documentElement, full => {
   fullscreenButton.setAttribute('aria-pressed', String(full));
   fullscreenButton.textContent = full ? 'Exit fullscreen' : 'Fullscreen';
   hub?.setFullscreen(full);
-  clearInput();
+  online?.setFullscreen(full);
+  releaseControls();
+}, message => {
+  if (online?.showing) online.showDisplayNotice(message);
+  else if (inHub) hub?.showNotice(message);
+  else announce(message, performance.now(), 3200);
 });
+function activateMatch(): void {
+  unlockAudio();
+  if (kitchen) fullscreen.enterOnLaunch();
+}
+fullscreenButton.addEventListener('click', fullscreen.toggle);
 stage.addEventListener('graphics-lost', () => {
   setPaused(true);
   clearInput();
@@ -772,6 +764,7 @@ function releaseControls(): void {
   if (networkFrame) online?.sendInput({ x: 0, z: 0 }, performance.now());
 }
 window.addEventListener('blur', releaseControls);
+matchMedia('(orientation: portrait)').addEventListener('change', releaseControls);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) return;
   if (networkFrame) releaseControls();
@@ -787,13 +780,13 @@ window.addEventListener('keydown', event => {
   }
   if (event.repeat) return;
   if (networkFrame) {
-    if (event.code === 'Escape' && !document.fullscreenElement) {
+    if (event.code === 'Escape' && !fullscreen.active) {
       event.preventDefault();
       showOnlineRoom();
     }
     return;
   }
-  if (event.code === 'Escape' && !document.fullscreenElement) setPaused(!paused);
+  if (event.code === 'Escape' && !fullscreen.active) setPaused(!paused);
   if (event.code === 'KeyR' && (paused || match.phase === 'result')) start();
 });
 window.addEventListener('keyup', event => held.delete(event.code));
@@ -801,7 +794,8 @@ if (usesHub) {
   if (onlineEnabled) online = createOnlineRooms({
     cover: kitchenCover,
     selected: () => selected,
-    activate: unlockAudio,
+    activate: activateMatch,
+    toggleFullscreen: fullscreen.toggle,
     room(state) {
       if (state.phase !== 'waiting' || !networkFrame) return;
       if (!inHub) returnToHub();
@@ -838,10 +832,10 @@ if (usesHub) {
       saveHubPreference('viber', viber.id);
     },
     toggleSound,
-    toggleFullscreen,
+    toggleFullscreen: fullscreen.toggle,
     openOnline: online && (() => {
-      unlockAudio();
       online?.open();
+      activateMatch();
     }),
   });
   document.title = 'Viber Mayhem';
@@ -852,3 +846,4 @@ if (usesHub) {
   arenaFrame = requestAnimationFrame(frame);
 }
 syncSound();
+element('game-loading')?.remove();

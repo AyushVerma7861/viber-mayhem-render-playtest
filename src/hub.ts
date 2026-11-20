@@ -5,7 +5,7 @@ import { ViberPreview } from './viber-preview.ts';
 import chefMark from './assets/chef-mark.png?inline';
 
 type Preference = 'viber' | 'sound';
-type Panel = 'games' | 'vibers' | 'guide' | 'settings';
+type Panel = 'games' | 'vibers' | 'guide' | 'settings' | 'game-data';
 
 function readPreference(key: Preference): string | null {
   try { return localStorage.getItem('viber-mayhem:' + key); } catch { return null; }
@@ -101,6 +101,17 @@ const layout = `
         <div class="hub-sheet-heading"><h2 id="lobby-settings-title">Settings</h2><button type="button" class="hub-icon-button" data-close aria-label="Close settings">×</button></div>
         <div class="hub-setting"><span>Match sound</span><button type="button" class="hub-switch" data-hub-sound aria-label="Match sound" aria-pressed="true">On</button></div>
         <div class="hub-setting"><span>Movement and match rules</span><button type="button" class="hub-panel-done" data-open="guide" aria-controls="lobby-guide" aria-expanded="false">Controls</button></div>
+        <div class="hub-setting"><span>Help and privacy</span><button type="button" class="hub-panel-done" data-open="game-data" aria-controls="lobby-game-data" aria-expanded="false">Game info</button></div>
+      </section>
+      <section class="hub-sheet hub-game-data" id="lobby-game-data" data-panel="game-data" aria-labelledby="lobby-game-data-title" hidden>
+        <div class="hub-sheet-heading"><h2 id="lobby-game-data-title">Help and privacy</h2><button type="button" class="hub-icon-button" data-close aria-label="Close game info">×</button></div>
+        <div data-online-help hidden>
+          <h3>Joining friends</h3>
+          <p>Open your friend's invite or enter their room code in Online Rooms. If a region hasn't answered, retry its ping. For a new room, you can also choose another region.</p>
+        </div>
+        <h3>Game data</h3>
+        <p>Play as a guest. Your sound setting and chosen Viber are saved in this browser.</p>
+        <p data-online-help hidden>Online play sends your moves to the selected server. This tab saves a temporary room seat so you can reconnect. The room ends when the last player leaves and any reserved seats expire.</p>
       </section>
     </div>
   </main>
@@ -140,7 +151,9 @@ export function createHub(options: HubOptions) {
     online.removeAttribute('aria-label');
     online.classList.remove('hub-locked');
     online.textContent = 'Online Rooms';
+    online.setAttribute('aria-haspopup', 'dialog');
     online.addEventListener('click', options.openOnline);
+    root.querySelectorAll<HTMLElement>('[data-online-help]').forEach(item => { item.hidden = false; });
   }
   const roster = require('.hub-viber-options');
   const seats = require('.hub-seats');
@@ -200,7 +213,7 @@ export function createHub(options: HubOptions) {
       const panel = panels.find(item => item.dataset.panel === next);
       const first = panel?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')
         ?? panel?.querySelector<HTMLButtonElement>('[data-close]');
-      first?.focus({ preventScroll: true });
+      first?.focus();
     } else {
       const returnTarget = previousOpener?.closest('[hidden]')
         ? require('[data-open="settings"]')

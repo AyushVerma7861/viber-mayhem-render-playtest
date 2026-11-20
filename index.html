@@ -3,12 +3,18 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#0c1219">
-    <meta name="description" content="Freight Tag, the first playable Viber Mayhem mini-game.">
-    <title>Freight Tag · Viber Mayhem</title>
+    <meta name="theme-color" content="#211918">
+    <meta name="description" content="Pass the cooker, dodge the trolleys, and outlast your rivals in Let Them Cook, a Viber Mayhem browser party game.">
+    <meta property="og:title" content="Let Them Cook · Viber Mayhem">
+    <meta property="og:description" content="Pass the cooker, dodge the trolleys, and outlast your rivals in Let Them Cook.">
+    <title>Let Them Cook · Viber Mayhem</title>
   </head>
   <body>
-    <div id="shell" data-arena="kitchen">
+    <div id="game-loading" role="status">
+      <span>Loading Viber Mayhem…</span>
+      <noscript><span>Enable JavaScript to play Viber Mayhem.</span></noscript>
+    </div>
+    <div id="shell" data-arena="kitchen" hidden>
       <header class="topbar">
         <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i></span><span>VIBER <b>MAYHEM</b></span></div>
         <div class="top-actions">

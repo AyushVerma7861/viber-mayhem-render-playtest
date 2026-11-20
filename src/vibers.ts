@@ -1,7 +1,7 @@
-import viber10 from './assets/vibers/viber-10.png?inline';
-import viber31 from './assets/vibers/viber-31.png?inline';
-import viber84 from './assets/vibers/viber-84.png?inline';
-import agent123 from './assets/vibers/agent-123.png?inline';
+import viber10 from './assets/vibers/viber-10.png';
+import viber31 from './assets/vibers/viber-31.png';
+import viber84 from './assets/vibers/viber-84.png';
+import agent123 from './assets/vibers/agent-123.png';
 
 export const VIBERS = [
   { name: 'Viber 10', id: 'viber-10', color: '#73d6b6', portrait: viber10 },
