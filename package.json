@@ -1,0 +1,29 @@
+{
+  "name": "viber-mayhem",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build && node tools/standalone.mjs",
+    "build:online": "tsc --noEmit && vite build --outDir online-dist",
+    "online": "node server/index.ts",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test test/simulation.test.ts test/kitchen.test.ts test/frame-clock.test.ts test/online-movement.test.ts test/online-regions.test.ts"
+  },
+  "dependencies": {
+    "@colyseus/core": "0.18.29",
+    "@colyseus/sdk": "0.18.10",
+    "@colyseus/ws-transport": "0.18.5",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/three": "0.187.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.8"
+  }
+}

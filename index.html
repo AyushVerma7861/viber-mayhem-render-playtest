@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0c1219">
+    <meta name="description" content="Freight Tag, the first playable Viber Mayhem mini-game.">
+    <title>Freight Tag · Viber Mayhem</title>
+  </head>
+  <body>
+    <div id="shell" data-arena="kitchen">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i></span><span>VIBER <b>MAYHEM</b></span></div>
+        <div class="top-actions">
+          <button id="online-room-button" class="small" type="button" hidden>Room</button>
+          <button id="sound" class="small" type="button" aria-pressed="true">Sound on</button>
+          <button id="fullscreen" class="small" type="button" aria-pressed="false"><span class="expand" aria-hidden="true"></span>Fullscreen</button>
+          <button id="pause" class="small" type="button" disabled>Pause</button>
+        </div>
+      </header>
+
+      <main>
+        <div class="title-row">
+          <div>
+            <p class="eyebrow">Local mini-game</p>
+            <h1>Freight Tag</h1>
+          </div>
+          <span class="arena-label"><span></span>Rail yard</span>
+        </div>
+
+        <div class="game-layout">
+          <div class="game">
+            <div id="stage" class="stage" aria-label="Freight Tag arena">
+              <canvas id="arena" aria-label="3D freight yard"></canvas>
+              <div class="stage-vignette" aria-hidden="true"></div>
+              <div class="stage-hud">
+                <div class="fuse" id="fuse" role="timer" aria-label="Core fuse">
+                  <div class="fuse-info"><span id="fuse-label">CORE FUSE</span><strong id="clock">10.5<span>s</span></strong></div>
+                  <div class="meter"><div id="fill"></div></div>
+                </div>
+                <div class="track-readout" aria-label="Cart signals">
+                  <div id="track-0" class="track" data-lane="0"><span></span><b>EAST</b><i>→</i></div>
+                  <div id="track-1" class="track" data-lane="1"><span></span><b>WEST</b><i>←</i></div>
+                </div>
+              </div>
+              <div id="markers" class="markers" aria-hidden="true"></div>
+              <div id="countdown" class="countdown" aria-hidden="true" hidden></div>
+              <div id="notice" class="notice" role="status" aria-live="polite"></div>
+              <p id="online-connection" role="status"></p>
+              <p id="online-spectator" role="status" hidden>You’re out · Watching the round</p>
+              <div id="touch" class="touch" aria-label="Touch movement area" hidden>
+                <div id="stick" class="stick"><div id="thumb"></div></div>
+              </div>
+              <div id="overlay" class="overlay">
+                <div class="overlay-card">
+                  <div class="overlay-icon" aria-hidden="true"><i></i></div>
+                  <div class="result-winner" id="result-winner" hidden>
+                    <img id="result-portrait" alt="">
+                    <span aria-hidden="true">1st</span>
+                  </div>
+                  <h2 id="overlay-title">Last courier standing</h2>
+                  <p id="overlay-text">Bump a rival to pass the core. Watch both tracks.</p>
+                  <ol class="result-places" id="result-places" start="2" aria-label="Other finishers" hidden></ol>
+                  <p id="online-rematch" role="status" hidden></p>
+                  <fieldset id="viber-picker" class="viber-picker" hidden>
+                    <legend>Choose your Viber</legend>
+                    <div id="viber-options"></div>
+                  </fieldset>
+                  <div class="overlay-actions">
+                    <button id="primary" type="button">Start match <span aria-hidden="true">→</span></button>
+                    <button id="restart" class="small" type="button" hidden>Restart match</button>
+                    <button id="back-to-hub" class="small" type="button" hidden>Back to Lobby</button>
+                  </div>
+                </div>
+              </div>
+              <pre id="debug" hidden></pre>
+            </div>
+            <div class="controls">
+              <div class="desktop-controls"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>or arrow keys to move</span></div>
+              <div class="touch-controls"><span>Drag on the left side to move</span></div>
+              <div class="pause-hint"><kbd>Esc</kbd><span>Pause</span></div>
+            </div>
+          </div>
+
+          <aside class="sidebar">
+            <section class="panel">
+              <div class="panel-heading"><h2>Couriers</h2><span id="alive">4 / 4</span></div>
+              <ol id="roster" class="roster"></ol>
+            </section>
+            <section class="panel rules">
+              <div class="panel-heading"><h2>How to play</h2></div>
+              <ul>
+                <li><span class="rule-icon core-rule" aria-hidden="true"></span><div><strong>Tag to pass</strong><span>The fuse keeps burning when the core changes hands.</span></div></li>
+                <li><span class="rule-icon track-rule" aria-hidden="true"></span><div><strong>Watch the rails</strong><span>Freight from either direction can stun you for two seconds.</span></div></li>
+                <li><span class="rule-icon win-rule" aria-hidden="true">✦</span><div><strong>Survive the blast</strong><span>The courier holding the core when the fuse runs out is eliminated.</span></div></li>
+              </ul>
+            </section>
+          </aside>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

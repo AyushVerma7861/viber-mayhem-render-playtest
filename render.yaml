@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: viber-mayhem-free-playtest
+    runtime: docker
+    plan: free
+    region: singapore
+    autoDeployTrigger: "off"
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8080"
