@@ -4,7 +4,7 @@ import type { Client } from '@colyseus/core';
 import { KITCHEN_ARENA } from '../src/arena.ts';
 import { HZ, Match } from '../src/simulation.ts';
 import type { MatchView } from '../src/simulation.ts';
-import { RECONNECT_SECONDS, ROOM_SERVER_BUSY, SEAT_COUNT, SNAPSHOT_TICKS } from '../src/online-protocol.ts';
+import { RECONNECT_SECONDS, ROOM_PING, ROOM_SERVER_BUSY, SEAT_COUNT, SNAPSHOT_TICKS } from '../src/online-protocol.ts';
 import type { AppliedInput, OnlineInput, RoomPhase, RoomView, Snapshot } from '../src/online-protocol.ts';
 
 type Seat = {
@@ -58,6 +58,7 @@ export class MayhemRoom extends Room {
       this.roomId = randomBytes(9).toString('base64url');
       await this.setPrivate(true);
       this.onMessage('sync', client => this.sync(client));
+      this.onMessage(ROOM_PING, () => true);
       this.onMessage('viber', (client, value: unknown) => this.selectViber(client, value));
       this.onMessage('ready', (client, value: unknown) => this.ready(client, value));
       this.onMessage('start', client => this.startRound(client));

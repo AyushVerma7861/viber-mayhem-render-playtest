@@ -79,12 +79,12 @@ export class CookerAudio {
   private duckWarningUntil = -Infinity;
   private lastStrike: { at: number; gain: GainNode } | null = null;
 
-  constructor(private readonly context: BaseAudioContext) {
+  constructor(private readonly context: BaseAudioContext, output: AudioNode = context.destination) {
     this.effectsBus = context.createGain();
     this.effectsBus.gain.value = 0.72;
-    this.effectsBus.connect(context.destination);
+    this.effectsBus.connect(output);
     this.warningBus = context.createGain();
-    this.warningBus.connect(context.destination);
+    this.warningBus.connect(output);
 
     this.noise = context.createBuffer(1, context.sampleRate * 2, context.sampleRate);
     const data = this.noise.getChannelData(0);

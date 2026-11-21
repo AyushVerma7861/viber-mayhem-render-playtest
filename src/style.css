@@ -242,12 +242,12 @@ kbd { min-width: 21px; padding: 2px 4px; text-align: center; border: 1px solid #
 #shell[data-arena="kitchen"] > .topbar {
   position: absolute; z-index: 5; right: max(10px, env(safe-area-inset-right));
   bottom: max(10px, env(safe-area-inset-bottom)); min-height: 0; padding: 0;
-  border: 0; background: none;
+  border: 0; background: none; pointer-events: none;
 }
 #shell[data-arena="kitchen"] .top-actions { gap: 5px; }
 #shell[data-arena="kitchen"] .top-actions .small {
   position: relative; width: 42px; height: 42px; min-height: 0; padding: 0;
-  gap: 0; font-size: 0; background: #302424e8;
+  gap: 0; font-size: 0; background: #302424e8; pointer-events: auto;
 }
 #shell[data-arena="kitchen"] .top-actions .small::before {
   content: ''; display: block; width: 17px; height: 17px; background: currentColor;
@@ -363,7 +363,7 @@ kbd { min-width: 21px; padding: 2px 4px; text-align: center; border: 1px solid #
 }
 
 [data-arena="kitchen"] .stage[data-phase="result"] { touch-action: auto; }
-[data-arena="kitchen"] .stage:has(.overlay[data-results]) .stage-hud { visibility: hidden; }
+[data-arena="kitchen"] .stage:has(.overlay[data-results]:not([hidden])) .stage-hud { visibility: hidden; }
 [data-arena="kitchen"] .overlay[data-results] {
   align-items: safe center;
   overflow: auto;

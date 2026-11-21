@@ -4,7 +4,8 @@ import type { Viber } from './vibers.ts';
 import { ViberPreview } from './viber-preview.ts';
 import chefMark from './assets/chef-mark.png?inline';
 
-type Preference = 'viber' | 'sound';
+export type AudioChannel = 'music' | 'effects';
+type Preference = 'viber' | 'sound' | 'music' | `${AudioChannel}-volume`;
 type Panel = 'games' | 'vibers' | 'guide' | 'settings' | 'game-data';
 
 function readPreference(key: Preference): string | null {
@@ -15,9 +16,20 @@ export function saveHubPreference(key: Preference, value: string): void {
   try { localStorage.setItem('viber-mayhem:' + key, value); } catch { /* Browser storage may be unavailable. */ }
 }
 
-export function readHubPreferences(): { viber: Viber; sound: boolean } {
+function readVolume(channel: AudioChannel, fallback: number): number {
+  const saved = readPreference(`${channel}-volume`);
+  const level = saved?.trim() ? Number(saved) : NaN;
+  return Number.isFinite(level) ? Math.max(0, Math.min(100, Math.round(level))) : fallback;
+}
+
+export function readHubPreferences() {
   const id = readPreference('viber');
-  return { viber: VIBERS.find(viber => viber.id === id) ?? VIBERS[0], sound: readPreference('sound') !== 'off' };
+  const muted = readPreference('sound') === 'off';
+  return {
+    viber: VIBERS.find(viber => viber.id === id) ?? VIBERS[0],
+    effectsVolume: readVolume('effects', muted ? 0 : 100),
+    musicVolume: readVolume('music', muted || readPreference('music') === 'off' ? 0 : 100),
+  };
 }
 
 type MiniGame = {
@@ -30,12 +42,12 @@ type MiniGame = {
 
 type HubOptions = {
   selected: Viber;
-  sound: boolean;
   games: readonly [MiniGame, ...MiniGame[]];
   selectViber(viber: Viber): void;
-  toggleSound(): void;
+  setVolume(channel: AudioChannel, level: number): void;
   toggleFullscreen(): void;
   openOnline?(): void;
+  previewPing?(): void;
 };
 
 const lock = '<span class="hub-lock" aria-hidden="true"></span>';
@@ -99,7 +111,15 @@ const layout = `
       </section>
       <section class="hub-sheet" id="lobby-settings" data-panel="settings" aria-labelledby="lobby-settings-title" hidden>
         <div class="hub-sheet-heading"><h2 id="lobby-settings-title">Settings</h2><button type="button" class="hub-icon-button" data-close aria-label="Close settings">×</button></div>
-        <div class="hub-setting"><span>Match sound</span><button type="button" class="hub-switch" data-hub-sound aria-label="Match sound" aria-pressed="true">On</button></div>
+        <div class="hub-volume">
+          <label for="lobby-volume-music">Lobby music</label><span aria-hidden="true" data-volume-value="music">100%</span>
+          <input id="lobby-volume-music" type="range" min="0" max="100" value="100">
+        </div>
+        <div class="hub-volume">
+          <label for="lobby-volume-effects">Sound effects</label><span aria-hidden="true" data-volume-value="effects">100%</span>
+          <input id="lobby-volume-effects" type="range" min="0" max="100" value="100">
+        </div>
+        <div class="hub-setting" data-ping-settings hidden><span>Online HUD</span><button type="button" class="hub-panel-done" data-ping-preview>Ping preview</button></div>
         <div class="hub-setting"><span>Movement and match rules</span><button type="button" class="hub-panel-done" data-open="guide" aria-controls="lobby-guide" aria-expanded="false">Controls</button></div>
         <div class="hub-setting"><span>Help and privacy</span><button type="button" class="hub-panel-done" data-open="game-data" aria-controls="lobby-game-data" aria-expanded="false">Game info</button></div>
       </section>
@@ -110,7 +130,7 @@ const layout = `
           <p>Open your friend's invite or enter their room code in Online Rooms. If a region hasn't answered, retry its ping. For a new room, you can also choose another region.</p>
         </div>
         <h3>Game data</h3>
-        <p>Play as a guest. Your sound setting and chosen Viber are saved in this browser.</p>
+        <p>Play as a guest. Your sound settings and chosen Viber are saved in this browser.</p>
         <p data-online-help hidden>Online play sends your moves to the selected server. This tab saves a temporary room seat so you can reconnect. The room ends when the last player leaves and any reserved seats expire.</p>
       </section>
     </div>
@@ -138,7 +158,14 @@ export function createHub(options: HubOptions) {
   const require = <T extends HTMLElement = HTMLElement>(selector: string) => root.querySelector<T>(selector)!;
   const openers = [...root.querySelectorAll<HTMLButtonElement>('[data-open]')];
   const panels = [...root.querySelectorAll<HTMLElement>('.hub-sheet')];
-  const sound = require<HTMLButtonElement>('[data-hub-sound]');
+  const sliders = {
+    music: require<HTMLInputElement>('#lobby-volume-music'),
+    effects: require<HTMLInputElement>('#lobby-volume-effects'),
+  };
+  const volumeLabels = {
+    music: require('[data-volume-value="music"]'),
+    effects: require('[data-volume-value="effects"]'),
+  };
   const fullscreen = require<HTMLButtonElement>('[data-hub-fullscreen]');
   const start = require<HTMLButtonElement>('[data-hub-start]');
   const stage = require('.hub-preview-stage');
@@ -154,6 +181,10 @@ export function createHub(options: HubOptions) {
     online.setAttribute('aria-haspopup', 'dialog');
     online.addEventListener('click', options.openOnline);
     root.querySelectorAll<HTMLElement>('[data-online-help]').forEach(item => { item.hidden = false; });
+  }
+  if (options.previewPing) {
+    require('[data-ping-settings]').hidden = false;
+    require('[data-ping-preview]').addEventListener('click', options.previewPing);
   }
   const roster = require('.hub-viber-options');
   const seats = require('.hub-seats');
@@ -299,7 +330,10 @@ export function createHub(options: HubOptions) {
     }
   });
   start.addEventListener('click', () => game.start());
-  sound.addEventListener('click', options.toggleSound);
+  const channels = ['music', 'effects'] as const;
+  for (const channel of channels) {
+    sliders[channel].addEventListener('input', () => options.setVolume(channel, sliders[channel].valueAsNumber));
+  }
   fullscreen.addEventListener('click', options.toggleFullscreen);
   root.querySelectorAll<HTMLButtonElement>('[data-cycle]').forEach(button => {
     button.addEventListener('click', () => {
@@ -326,12 +360,6 @@ export function createHub(options: HubOptions) {
   });
   require('[data-reset-model]').addEventListener('click', () => preview?.reset());
 
-  function setSound(enabled: boolean): void {
-    sound.setAttribute('aria-pressed', String(enabled));
-    sound.textContent = enabled ? 'On' : 'Off';
-  }
-
-  setSound(options.sound);
   syncGame();
   syncViber();
   return {
@@ -355,7 +383,16 @@ export function createHub(options: HubOptions) {
       preview?.show(false);
       root.hidden = true;
     },
-    setSound,
+    get showing() { return !root.hidden; },
+    setAudio(effects: number, music: number) {
+      const levels = { effects, music };
+      for (const channel of channels) {
+        const level = levels[channel] + '%';
+        sliders[channel].value = String(levels[channel]);
+        sliders[channel].setAttribute('aria-valuetext', level);
+        volumeLabels[channel].textContent = level;
+      }
+    },
     setFullscreen(enabled: boolean) {
       fullscreen.setAttribute('aria-pressed', String(enabled));
       const label = enabled ? 'Exit fullscreen' : 'Fullscreen';

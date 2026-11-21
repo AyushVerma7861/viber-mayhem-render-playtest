@@ -1,17 +1,20 @@
 import './online-rooms.css';
 import { Client, MatchMakeError } from '@colyseus/sdk';
 import type { Room } from '@colyseus/sdk';
-import { RECONNECT_SECONDS, ROOM_SERVER_BUSY, ROOM_TYPE } from './online-protocol.ts';
+import { RECONNECT_SECONDS, ROOM_PING, ROOM_SERVER_BUSY, ROOM_TYPE } from './online-protocol.ts';
 import type { RoomView, Snapshot } from './online-protocol.ts';
 import { parseRegionDirectory, preferredRegion, readRoomRoute } from './online-regions.ts';
 import type { GameRegion, RegionDirectory, RoomRoute } from './online-regions.ts';
+import { pingQuality, pingText } from './ping-indicator.ts';
+import type { PingReading } from './ping-indicator.ts';
 import type { Vec } from './simulation.ts';
 import { VIBERS } from './vibers.ts';
 import type { Viber } from './vibers.ts';
 
 const SESSION = 'viber-mayhem:online-seat';
 const PING_TIMEOUT = 2200;
-const PING_MAX_AGE = 60000;
+const REGION_PING_INTERVAL = 5000;
+const ROOM_PING_INTERVAL = 1000;
 const WAKE_TIMEOUT = 70000;
 const SYNC_INTERVAL = 1000;
 const SYNC_ATTEMPTS = 5;
@@ -19,6 +22,7 @@ export const onlineEnabled = document.documentElement.hasAttribute('data-online'
 
 type Callbacks = {
   cover: string;
+  ping(reading: PingReading): void;
   selected(): Viber;
   activate(): void;
   canPlay(): boolean;
@@ -29,6 +33,12 @@ type Callbacks = {
   actionNotice(message: string): void;
   left(): void;
 };
+
+function updatePing(label: HTMLElement, milliseconds: number | null | undefined, unknown: string): void {
+  const value = milliseconds == null ? unknown : milliseconds + ' ms';
+  if (label.textContent !== value) label.textContent = value;
+  label.dataset.quality = milliseconds == null ? 'unknown' : pingQuality(milliseconds);
+}
 
 function waitingFor(state: RoomView): string {
   const away = state.seats.filter(seat => seat.kind === 'away').length;
@@ -56,11 +66,11 @@ export function createOnlineRooms(callbacks: Callbacks) {
       <div class="online-entry-options">
         <div class="online-entry-card">
           <h3>Host a game</h3>
-          <p>Invite friends to your room. Bots fill any open seats.</p>
-          <label class="online-region" data-region-controls hidden>
-            <span>Server region</span>
-            <select aria-describedby="online-region-help"><option value="">Auto</option></select>
-          </label>
+          <p class="online-entry-intro">Invite friends to your room. Bots fill any open seats.</p>
+          <fieldset class="online-region" aria-describedby="online-region-help" data-region-controls hidden>
+            <legend>Server region</legend>
+            <div class="online-region-grid"></div>
+          </fieldset>
           <p id="online-region-help" role="status" hidden></p>
           <button type="button" data-retry-pings hidden>Retry pings</button>
           <button type="button" class="online-gold" data-create-room>Create private room</button>
@@ -122,7 +132,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
   const fullscreenButton = get<HTMLButtonElement>('[data-online-fullscreen]');
   const manualInvite = get('[data-manual-invite]');
   const shareButton = get<HTMLButtonElement>('[data-share-invite]');
-  const regionChoice = get<HTMLSelectElement>('.online-region select');
+  const regionControls = get<HTMLFieldSetElement>('[data-region-controls]');
+  const regionGrid = get('.online-region-grid');
   const regionHelp = get('#online-region-help');
   const retryPings = get<HTMLButtonElement>('[data-retry-pings]');
   const retrySync = get<HTMLButtonElement>('[data-retry-sync]');
@@ -133,6 +144,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
   let view: RoomView | undefined;
   let busy = false;
   let connected = false;
+  let reconnecting = false;
   let awaitingSnapshot = false;
   let syncStalled = false;
   let syncTimer: number | undefined;
@@ -151,10 +163,36 @@ export function createOnlineRooms(callbacks: Callbacks) {
   let directoryLoaded = false;
   let directoryRequest: Promise<void> | undefined;
   const pings = new Map<string, number | null>();
+  const regionReadouts = new Map<string, HTMLElement>();
   let pingRequest: Promise<void> | undefined;
   let lastPingAt = -Infinity;
+  let regionPingTimer: number | undefined;
   let activeRegion: GameRegion | undefined;
-  let activePing: number | undefined;
+  let activePing: number | null | undefined;
+  let roomPingTimer: number | undefined;
+  let roomPingVersion = 0;
+
+  function addRegionChoice(id: string, name: string) {
+    const option = document.createElement('label');
+    option.className = 'online-region-option';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'mayhem-region';
+    radio.value = id;
+    radio.checked = id === '';
+    const title = document.createElement('strong');
+    title.textContent = name;
+    const ping = document.createElement('span');
+    ping.className = 'online-region-ping';
+    ping.id = 'mayhem-region-ping-' + id;
+    radio.setAttribute('aria-label', name);
+    radio.setAttribute('aria-describedby', ping.id);
+    option.append(radio, title, ping);
+    regionGrid.append(option);
+    regionReadouts.set(id, ping);
+    return ping;
+  }
+  const autoReadout = addRegionChoice('', 'Auto');
 
   function notice(message: string) { get('[data-room-notice]').textContent = message; }
   function storage(value?: string) {
@@ -192,8 +230,9 @@ export function createOnlineRooms(callbacks: Callbacks) {
       if (!configured) return;
       directory = configured;
       configuredDirectory = true;
-      for (const region of directory.regions) regionChoice.add(new Option(region.label, region.id));
-      get('[data-region-controls]').hidden = directory.regions.length < 2;
+      for (const region of directory.regions) addRegionChoice(region.id, region.label);
+      regionControls.hidden = directory.regions.length < 2;
+      updateRegionLabels();
     } catch { /* Single-server and older previews can still use their own origin. */ }
     finally { window.clearTimeout(timeout); }
   }
@@ -207,39 +246,49 @@ export function createOnlineRooms(callbacks: Callbacks) {
     const preferred = preferredRegion(directory, pings);
     const fastest = pings.get(preferred.id);
     const finished = pings.size === directory.regions.length;
-    regionChoice.options[0].textContent = finished && fastest != null ? 'Auto · ' + preferred.label + ' · ' + fastest + ' ms' : 'Auto';
+    autoReadout.textContent = fastest != null ? preferred.label + ' · ' + fastest + ' ms' : finished ? 'Home server' : 'Finding fastest…';
     for (const region of directory.regions) {
-      const option = [...regionChoice.options].find(item => item.value === region.id);
-      if (!option) continue;
       const ping = pings.get(region.id);
-      option.textContent = region.label + (ping === undefined ? ' · checking…' : ping === null ? ' · no reply' : ' · ' + ping + ' ms');
+      updatePing(regionReadouts.get(region.id)!, ping, ping === null ? 'No reply' : 'Checking…');
     }
     const missed = finished && directory.regions.some(region => pings.get(region.id) === null);
     regionHelp.hidden = retryPings.hidden = !missed;
     if (missed) regionHelp.textContent = 'Some servers may be waking up. You can retry their pings.';
   }
 
-  function checkPing(retry = false) {
-    if (directory.regions.length < 2 || pingRequest || !retry && performance.now() - lastPingAt < PING_MAX_AGE) return pingRequest;
-    const regions = retry && performance.now() - lastPingAt < PING_MAX_AGE
-      ? directory.regions.filter(region => pings.get(region.id) === null)
-      : directory.regions;
-    for (const region of regions) pings.delete(region.id);
-    updateRegionLabels();
-    pingRequest = Promise.all(regions.map(async region => {
+  function scheduleRegionPing() {
+    window.clearTimeout(regionPingTimer);
+    if (pingRequest || !dialog.open || document.hidden || room || busy || directory.regions.length < 2) return;
+    const delay = Math.max(0, Math.ceil(REGION_PING_INTERVAL - (performance.now() - lastPingAt)));
+    if (!delay) {
+      void checkPing();
+      return;
+    }
+    regionPingTimer = window.setTimeout(() => void checkPing(), delay);
+  }
+
+  function checkPing(force = false) {
+    if (directory.regions.length < 2 || pingRequest) return pingRequest;
+    if (!force && performance.now() - lastPingAt < REGION_PING_INTERVAL) {
+      scheduleRegionPing();
+      return;
+    }
+    window.clearTimeout(regionPingTimer);
+    pingRequest = Promise.all(directory.regions.map(async region => {
       try {
-        pings.set(region.id, Math.round(await new Client(region.origin).getLatency({ pingCount: 3, timeout: PING_TIMEOUT })));
+        pings.set(region.id, Math.round(await new Client(region.origin).getLatency({ pingCount: 1, timeout: PING_TIMEOUT })));
       } catch { pings.set(region.id, null); }
       updateRegionLabels();
     })).then(() => {
       lastPingAt = performance.now();
       pingRequest = undefined;
+      scheduleRegionPing();
     });
     return pingRequest;
   }
 
   async function waitForRegion(client: Client, region: GameRegion, current: number) {
-    if (pings.get(region.id) != null && performance.now() - lastPingAt < PING_MAX_AGE) return true;
+    if (pings.get(region.id) != null && performance.now() - lastPingAt < REGION_PING_INTERVAL) return true;
     const deadline = performance.now() + WAKE_TIMEOUT;
     while (current === attempt && performance.now() < deadline) {
       try {
@@ -259,9 +308,39 @@ export function createOnlineRooms(callbacks: Callbacks) {
   }
 
   function showRoomRegion() {
-    const text = configuredDirectory && activeRegion
-      ? ' · ' + activeRegion.label + (activePing === undefined ? '' : ' · ' + activePing + ' ms') : '';
-    get('[data-room-region]').textContent = 'LET THEM COOK' + text;
+    const reading: PingReading = reconnecting ? 'reconnecting' :
+      activePing === null ? 'no-reply' : activePing ?? 'checking';
+    callbacks.ping(reading);
+    const subtitle = activeRegion
+      ? activeRegion.label + ' · ' + (typeof reading === 'number' ? 'Ping ' : '') + pingText(reading)
+      : 'LET THEM COOK';
+    const label = get('[data-room-region]');
+    if (label.textContent !== subtitle) label.textContent = subtitle;
+  }
+
+  async function measureRoomPing() {
+    const joined = room;
+    if (!joined?.connection.isOpen || document.hidden) return;
+    const version = roomPingVersion;
+    const started = performance.now();
+    let ping: number | null = null;
+    try {
+      await joined.request(ROOM_PING, undefined, { timeout: PING_TIMEOUT });
+      const elapsed = performance.now() - started;
+      if (elapsed <= PING_TIMEOUT) ping = Math.round(elapsed);
+    } catch { /* A slow or interrupted reply is replaced by the next measurement. */ }
+    if (version !== roomPingVersion) return;
+    activePing = ping;
+    showRoomRegion();
+    roomPingTimer = window.setTimeout(() => void measureRoomPing(), Math.max(0, ROOM_PING_INTERVAL - (performance.now() - started)));
+  }
+
+  function resetRoomPing() {
+    window.clearTimeout(roomPingTimer);
+    roomPingVersion++;
+    activePing = undefined;
+    showRoomRegion();
+    void measureRoomPing();
   }
 
   function invite(code: string) {
@@ -297,7 +376,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
     closeButton.textContent = !view && (busy || room) ? 'Cancel' : '×';
     closeButton.toggleAttribute('data-cancel-entry', !view && (busy || !!room));
     createButton.disabled = codeInput.disabled = get<HTMLButtonElement>('[type="submit"]').disabled = busy || !!room && !view;
-    regionChoice.disabled = retryPings.disabled = busy;
+    regionControls.disabled = retryPings.disabled = busy;
     retrySync.hidden = !syncStalled || !confirm.hidden;
     showRoomRegion();
     if (!view) return;
@@ -387,6 +466,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
 
   function close() {
     confirm.hidden = true;
+    window.clearTimeout(regionPingTimer);
     window.clearTimeout(displayNoticeTimer);
     get('[data-display-notice]').textContent = '';
     if (dialog.open) dialog.close();
@@ -395,15 +475,12 @@ export function createOnlineRooms(callbacks: Callbacks) {
   function open() {
     if (!dialog.open) dialog.showModal();
     render();
-    if (!room && !busy) void loadDirectory().then(() => {
-      if (dialog.open && !room && !busy) void checkPing();
-    });
+    if (!room && !busy) void loadDirectory().then(scheduleRegionPing);
   }
 
   function attach(joined: Room, region: GameRegion) {
     room = joined;
     activeRegion = region;
-    activePing = undefined;
     connected = false;
     joined.reconnection.minUptime = 0;
     joined.reconnection.maxDelay = 1500;
@@ -441,7 +518,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
     joined.onDrop(() => {
       if (room !== joined) return;
       connected = false;
-      activePing = undefined;
+      reconnecting = true;
+      resetRoomPing();
       awaitingSnapshot = false;
       stopSync();
       window.clearInterval(reconnectTimer);
@@ -459,6 +537,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
       window.clearInterval(reconnectTimer);
       saveSeat(joined, region);
       beginSync(joined);
+      resetRoomPing();
     });
     joined.onLeave(() => {
       if (room !== joined) return;
@@ -471,6 +550,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
       codeInput.focus();
     });
     beginSync(joined);
+    resetRoomPing();
   }
 
   function stopSync() {
@@ -503,15 +583,10 @@ export function createOnlineRooms(callbacks: Callbacks) {
     stopSync();
     awaitingSnapshot = false;
     connected = true;
+    reconnecting = false;
     notice('');
     updateConnection('');
     render();
-    const synced = room;
-    if (configuredDirectory) synced?.ping(ms => {
-      if (room !== synced || !connected) return;
-      activePing = ms;
-      showRoomRegion();
-    });
   }
 
   function forget() {
@@ -519,8 +594,9 @@ export function createOnlineRooms(callbacks: Callbacks) {
     room = undefined;
     view = undefined;
     connected = false;
+    reconnecting = false;
     activeRegion = undefined;
-    activePing = undefined;
+    resetRoomPing();
     awaitingSnapshot = false;
     confirm.hidden = true;
     manualInvite.hidden = true;
@@ -547,6 +623,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
   async function enter(input?: string, fromInvite = false) {
     if (busy || room) return;
     busy = true;
+    window.clearTimeout(regionPingTimer);
     const current = ++attempt;
     open();
     if (!fromInvite) callbacks.activate();
@@ -566,7 +643,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
           'Enter a valid room code or invite link for an available server.');
         return;
       }
-      const selected = directory.regions.find(region => region.id === regionChoice.value);
+      const selectedId = regionGrid.querySelector<HTMLInputElement>('input:checked')?.value;
+      const selected = directory.regions.find(region => region.id === selectedId);
       if (!route && !selected) await checkPing();
       if (current !== attempt) return;
       const region = route?.region ?? selected ?? preferredRegion(directory, pings);
@@ -605,6 +683,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
       if (current === attempt) {
         busy = false;
         render();
+        scheduleRegionPing();
         if (!room) (input === undefined ? createButton : codeInput).focus();
       }
     }
@@ -640,6 +719,10 @@ export function createOnlineRooms(callbacks: Callbacks) {
   closeButton.addEventListener('click', dismiss);
   fullscreenButton.addEventListener('click', callbacks.toggleFullscreen);
   dialog.addEventListener('cancel', event => { event.preventDefault(); dismiss(); });
+  document.addEventListener('visibilitychange', () => {
+    scheduleRegionPing();
+    if (room) resetRoomPing();
+  });
   retryPings.addEventListener('click', () => void checkPing(true));
   retrySync.addEventListener('click', () => { if (room) beginSync(room); });
   createButton.addEventListener('click', () => void enter());
@@ -716,6 +799,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
     if (view?.phase !== 'playing' || callbacks.canPlay()) close();
   });
 
+  void loadDirectory();
   return {
     open, close,
     setFullscreen(active: boolean) {

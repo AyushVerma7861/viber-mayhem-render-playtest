@@ -4,9 +4,12 @@ import { createGameFullscreen } from './game-fullscreen.ts';
 import { CookerAudio } from './cooker-audio.ts';
 import { COOKER_ICON, makeCookerPanel } from './cooker-feedback.ts';
 import { createHub, readHubPreferences, saveHubPreference } from './hub.ts';
+import type { AudioChannel } from './hub.ts';
 import { createOnlineRooms, onlineEnabled } from './online-rooms.ts';
 import { OnlineMovement } from './online-movement.ts';
 import type { RoomView, Snapshot } from './online-protocol.ts';
+import { PartyAudio } from './party-audio.ts';
+import { createPingIndicator, previewPing } from './ping-indicator.ts';
 import { KITCHEN_ARENA } from './arena.ts';
 import { CAST, FUSE_TICKS, HZ, Match, OFFLINE_SEAT, STEP } from './simulation.ts';
 import type { MatchView, Vec } from './simulation.ts';
@@ -27,6 +30,8 @@ const pauseButton = element<HTMLButtonElement>('pause');
 const restartButton = element<HTMLButtonElement>('restart');
 const backToHubButton = element<HTMLButtonElement>('back-to-hub');
 const onlineRoomButton = element<HTMLButtonElement>('online-room-button');
+const onlinePing = element('online-ping');
+const showPing = createPingIndicator(onlinePing);
 const onlineConnection = element('online-connection');
 const onlineSpectator = element('online-spectator');
 const onlineRematch = element('online-rematch');
@@ -56,6 +61,7 @@ const kitchen = shell.dataset.arena === 'kitchen' && query.get('arena') !== 'fre
 shell.dataset.arena = kitchen ? 'kitchen' : 'freight';
 const usesHub = kitchen && shell.dataset.entry !== 'arena';
 let inHub = usesHub;
+let pingPreviewAt: number | undefined;
 shell.hidden = usesHub;
 const preferences = usesHub ? readHubPreferences() : undefined;
 const routeTest = !kitchen && (shell.dataset.chasePolicy === 'clear-route' || query.get('chase') === 'route');
@@ -101,7 +107,7 @@ let resultAt = -Infinity;
 let noticeEnd = 0;
 let lastTickSound = -1;
 let displayedClock = '';
-let lastOverlay = '';
+let lastOverlay: string | undefined;
 let debugAt = 0;
 let frames = 0;
 let slowerFrames = 0;
@@ -255,19 +261,64 @@ for (const event of ['pointerup', 'pointercancel', 'lostpointercapture'] as cons
 }
 
 let audio: AudioContext | undefined;
+let effectsOutput: GainNode | undefined;
 let cookerAudio: CookerAudio | undefined;
-let sound = preferences?.sound ?? true;
+let partyAudio: PartyAudio | undefined;
+let effectsVolume = preferences?.effectsVolume ?? 100;
+let musicVolume = preferences?.musicVolume ?? 100;
+let lastEffectsVolume = effectsVolume || 100;
+let appliedEffectsGain = 0;
 
 function unlockAudio(): void {
-  if (!sound || !window.AudioContext) return;
-  audio ??= new AudioContext();
-  if (kitchen) cookerAudio ??= new CookerAudio(audio);
-  if (audio.state === 'suspended') void audio.resume().catch(() => {});
+  if (document.hidden || !effectsVolume && !(hub?.showing && musicVolume)) return;
+  const Context = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Context) return;
+  if (!audio) {
+    try { audio = new Context(); } catch { return; }
+    effectsOutput = audio.createGain();
+    effectsOutput.gain.value = 0;
+    effectsOutput.connect(audio.destination);
+    audio.addEventListener('statechange', syncAudioMix);
+    if (kitchen) {
+      cookerAudio = new CookerAudio(audio, effectsOutput);
+      if (usesHub) partyAudio = new PartyAudio(audio, effectsOutput);
+    }
+  }
+  if (audio.state !== 'running') void audio.resume().catch(() => {});
+  syncAudioMix();
+}
+
+function syncAudioMix(): void {
+  if (!audio || !effectsOutput) return;
+  const audible = audio.state === 'running' && !document.hidden;
+  const gain = audible ? effectsVolume / 100 : 0;
+  if (gain !== appliedEffectsGain) {
+    appliedEffectsGain = gain;
+    effectsOutput.gain.setTargetAtTime(gain, audio.currentTime, .012);
+  }
+  cookerAudio?.setEnabled(!!gain && !inHub && !paused && !needsLandscape() && !graphicsMessage);
+  partyAudio?.setLobbyVolume(audible && hub?.showing && !landscapePrompt.open ? musicVolume / 100 : 0);
+}
+
+if (kitchen) {
+  document.addEventListener('click', event => {
+    if (!event.isTrusted || !(event.target instanceof Element)) return;
+    unlockAudio();
+    const button = event.target.closest('button');
+    if (effectsVolume && button?.closest('#mayhem-hub, .online-room, #landscape-prompt') && !button.matches(':disabled')) {
+      partyAudio?.playMenu(button.matches('[data-cycle], [data-online-viber], .hub-seats button, .hub-viber-options button'));
+    }
+  }, true);
+  window.addEventListener('keydown', event => {
+    if (event.isTrusted && !event.repeat && !event.altKey && !event.ctrlKey && !event.metaKey) unlockAudio();
+  }, true);
+  // Touch movement captures the pointer without generating a regular click.
+  touch.addEventListener('pointerup', event => { if (event.isTrusted) unlockAudio(); });
 }
 
 function tone(from: number, to: number, duration: number, volume: number, type: OscillatorType,
   delay = 0): void {
-  if (!sound || audio?.state !== 'running') return;
+  if (!effectsVolume || !effectsOutput || audio?.state !== 'running') return;
   const oscillator = audio.createOscillator();
   const gain = audio.createGain();
   const start = audio.currentTime + delay;
@@ -277,7 +328,7 @@ function tone(from: number, to: number, duration: number, volume: number, type: 
   gain.gain.setValueAtTime(0.0001, start);
   gain.gain.linearRampToValueAtTime(volume, start + 0.012);
   gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-  oscillator.connect(gain).connect(audio.destination);
+  oscillator.connect(gain).connect(effectsOutput);
   oscillator.start(start);
   oscillator.stop(start + duration);
 }
@@ -349,7 +400,7 @@ function setPaused(value: boolean, reason = ''): void {
   if (!value && !canPlayInLandscape()) return;
   paused = value;
   pauseReason = value ? reason : '';
-  cookerAudio?.setEnabled(sound && !paused);
+  syncAudioMix();
   accumulated = 0;
   clearInput();
   if (!paused) {
@@ -376,15 +427,20 @@ function start(): void {
   clearInput();
   primary.blur();
   restartButton.blur();
+  syncAudioMix();
   updateInterface(match, OFFLINE_SEAT, previousFrame);
 }
 
-function playFromHub(): void {
+function playFromHub(pingPreview = false): void {
   activateMatch();
   if (!canPlayInLandscape()) return;
+  pingPreviewAt = pingPreview ? performance.now() : undefined;
+  onlinePing.toggleAttribute('data-preview', pingPreview);
+  onlinePing.title = pingPreview ? 'Simulated network ping' : 'Round-trip time to the match server';
   networkFrame = undefined;
   inHub = false;
   hub?.hide();
+  syncAudioMix();
   shell.hidden = false;
   document.title = 'Let Them Cook · Viber Mayhem';
   window.scrollTo(0, 0);
@@ -401,17 +457,18 @@ function playFromHub(): void {
 
 function returnToHub(): void {
   if (!hub) return;
+  pingPreviewAt = undefined;
   pausedForLandscape = false;
   closeLandscapePrompt();
   inHub = true;
   cancelAnimationFrame(arenaFrame);
-  cookerAudio?.setEnabled(false);
   clearInput();
   onlineMovement.reset();
   if (networkFrame) online?.sendInput({ x: 0, z: 0 }, performance.now());
   shell.hidden = true;
   document.title = 'Viber Mayhem';
   hub.show(true);
+  syncAudioMix();
   window.scrollTo(0, 0);
 }
 
@@ -428,7 +485,7 @@ function showOnlineRound(): void {
   applyOnlineCast(room);
   paused = false;
   resultAt = networkFrame.view.phase === 'result' ? performance.now() - 620 : -Infinity;
-  lastOverlay = '';
+  lastOverlay = undefined;
   clearInput();
   onlineMovement.reset();
   if (wasInHub) arenaFrame = requestAnimationFrame(frame);
@@ -475,6 +532,7 @@ function receiveSnapshot(snapshot: Snapshot): void {
   }
   if (!inHub) {
     if (!document.hidden && online?.connected) onlineMovement.reconcile(snapshot, room.you, now);
+    syncAudioMix();
     consumeEvents(view, room.you, now);
   }
   if (view.phase === 'result' && landscapeDuringPlay) closeLandscapePrompt();
@@ -564,6 +622,8 @@ function updateInterface(view: MatchView, localSeat: number, now: number): void 
   pauseButton.disabled = !active || !!graphicsMessage || activeOnline;
   pauseButton.hidden = activeOnline;
   onlineRoomButton.hidden = !activeOnline;
+  onlinePing.hidden = !activeOnline && pingPreviewAt === undefined;
+  if (!activeOnline && pingPreviewAt !== undefined) showPing(previewPing(now - pingPreviewAt));
   onlineSpectator.hidden = !activeOnline || view.phase !== 'play' || view.players[localSeat].alive;
   pauseButton.textContent = paused ? 'Resume' : 'Pause';
   pauseButton.setAttribute('aria-pressed', String(paused));
@@ -644,6 +704,7 @@ function frame(now: number): void {
   arenaFrame = requestAnimationFrame(frame);
   const elapsed = Math.max(0, now - previousFrame) / 1000;
   previousFrame = now;
+  syncAudioMix();
   if (networkFrame && online?.state) {
     const { view, time, span, gapMs } = networkFrame;
     const seat = online.state.you;
@@ -656,7 +717,6 @@ function frame(now: number): void {
     const sequence = steering ? online.sendInput(direction, now) : undefined;
     const pose = steering ? onlineMovement.advance(now, direction, sequence) : undefined;
     yard?.draw(view, Math.min(1, Math.max(0, (now - time) / span)), now, pose);
-    cookerAudio?.setEnabled(sound && !document.hidden);
     cookerAudio?.pressure(view.holder === null ? 0 : 1 - view.remaining / FUSE_TICKS,
       view.phase === 'play' && view.holder !== null && !document.hidden);
     updateInterface(view, seat, now);
@@ -695,7 +755,6 @@ function frame(now: number): void {
     }
   }
   yard?.draw(match, paused || match.phase === 'result' ? 1 : accumulated / STEP, now);
-  cookerAudio?.setEnabled(sound && !paused && !document.hidden);
   cookerAudio?.pressure(match.holder === null ? 0 : 1 - match.remaining / FUSE_TICKS,
     match.phase === 'play' && match.holder !== null && !paused && !document.hidden);
   updateInterface(match, OFFLINE_SEAT, now);
@@ -739,18 +798,23 @@ backToHubButton.addEventListener('click', () => {
 });
 onlineRoomButton.addEventListener('click', showOnlineRoom);
 function syncSound(): void {
-  soundButton.textContent = sound ? 'Sound on' : 'Sound off';
+  const sound = effectsVolume > 0;
+  soundButton.textContent = sound ? 'Effects on' : 'Effects muted';
   soundButton.setAttribute('aria-pressed', String(sound));
-  hub?.setSound(sound);
+  soundButton.title = sound ? 'Mute sound effects' : 'Unmute sound effects';
+  hub?.setAudio(effectsVolume, musicVolume);
+  syncAudioMix();
 }
-function toggleSound(): void {
-  sound = !sound;
-  if (usesHub) saveHubPreference('sound', sound ? 'on' : 'off');
+function setVolume(channel: AudioChannel, level: number): void {
+  if (channel === 'effects') {
+    effectsVolume = level;
+    if (level) lastEffectsVolume = level;
+  } else musicVolume = level;
+  if (usesHub) saveHubPreference(`${channel}-volume`, String(level));
+  if (level && audio?.state !== 'running') unlockAudio();
   syncSound();
-  cookerAudio?.setEnabled(sound && !paused && !inHub);
-  if (sound && !inHub) unlockAudio();
 }
-soundButton.addEventListener('click', toggleSound);
+soundButton.addEventListener('click', () => setVolume('effects', effectsVolume ? 0 : lastEffectsVolume));
 const fullscreen = createGameFullscreen(document.documentElement, full => {
   fullscreenButton.setAttribute('aria-pressed', String(full));
   fullscreenButton.textContent = full ? 'Exit fullscreen' : 'Fullscreen';
@@ -774,11 +838,13 @@ function openLandscapePrompt(duringPlay: boolean): void {
   landscapeBack.textContent = duringPlay && networkFrame ? 'Back to Room' :
     duringPlay && hub ? 'Back to Lobby' : 'Back';
   if (!landscapePrompt.open) landscapePrompt.showModal();
+  syncAudioMix();
 }
 function closeLandscapePrompt(): void {
   if (landscapePrompt.open) landscapePrompt.close();
   landscapeDuringPlay = false;
   landscapeNotice.textContent = '';
+  syncAudioMix();
 }
 function canPlayInLandscape(): boolean {
   if (!needsLandscape()) return true;
@@ -833,7 +899,11 @@ window.addEventListener('blur', releaseControls);
 portrait.addEventListener('change', syncLandscape);
 coarse.addEventListener('change', syncLandscape);
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) return;
+  if (!document.hidden) {
+    if (audio || hub?.showing) unlockAudio();
+    return;
+  }
+  syncAudioMix();
   if (networkFrame) releaseControls();
   else setPaused(true);
 });
@@ -860,6 +930,7 @@ window.addEventListener('keyup', event => held.delete(event.code));
 if (usesHub) {
   if (onlineEnabled) online = createOnlineRooms({
     cover: kitchenCover,
+    ping: showPing,
     selected: () => selected,
     activate: activateMatch,
     canPlay: canPlayInLandscape,
@@ -883,7 +954,6 @@ if (usesHub) {
   });
   hub = createHub({
     selected,
-    sound,
     games: [{
       id: 'let-them-cook',
       title: gameTitle,
@@ -899,8 +969,9 @@ if (usesHub) {
       selected = viber;
       saveHubPreference('viber', viber.id);
     },
-    toggleSound,
+    setVolume,
     toggleFullscreen: fullscreen.toggle,
+    previewPing: onlineEnabled ? undefined : () => playFromHub(true),
     openOnline: online && (() => {
       online?.open();
       activateMatch();
@@ -908,6 +979,7 @@ if (usesHub) {
   });
   document.title = 'Viber Mayhem';
   hub.show();
+  if (musicVolume) unlockAudio();
   online?.startFromLink();
 } else {
   updateInterface(match, OFFLINE_SEAT, previousFrame);
