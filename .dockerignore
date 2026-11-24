@@ -9,3 +9,6 @@
 !src/**
 !server/
 !server/**
+!build.mjs
+!pizza-party/
+!pizza-party/**

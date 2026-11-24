@@ -5,7 +5,8 @@ import { KITCHEN_ARENA } from '../src/arena.ts';
 import { HZ, Match } from '../src/simulation.ts';
 import type { MatchView } from '../src/simulation.ts';
 import { RECONNECT_SECONDS, ROOM_PING, ROOM_SERVER_BUSY, SEAT_COUNT, SNAPSHOT_TICKS } from '../src/online-protocol.ts';
-import type { AppliedInput, OnlineInput, RoomPhase, RoomView, Snapshot } from '../src/online-protocol.ts';
+import type { AppliedInput, GameId, OnlineInput, RoomPhase, RoomView, Snapshot } from '../src/online-protocol.ts';
+import { PizzaRound } from './pizza-round.ts';
 
 type Seat = {
   viber: number;
@@ -20,6 +21,7 @@ type Seat = {
 const TICK_MS = 1000 / HZ;
 const MAX_CATCH_UP_STEPS = 24;
 const STALE_INPUT_MS = 450;
+const PIZZA_LOAD_TIMEOUT_MS = 12000;
 const MAX_ROOMS = Number(process.env.MAYHEM_MAX_ROOMS ?? 8);
 if (!Number.isSafeInteger(MAX_ROOMS) || MAX_ROOMS < 1) throw new Error('MAYHEM_MAX_ROOMS must be a positive integer.');
 const ROOM_CREATION_WINDOW_MS = 10000;
@@ -32,6 +34,9 @@ export class MayhemRoom extends Room {
   maxClients = SEAT_COUNT;
   maxMessagesPerSecond = 120;
   private readonly match = new Match(0, 'nearest', KITCHEN_ARENA);
+  private pizza: PizzaRound | undefined;
+  private pizzaLoading: { seats: Set<number>; until: number } | undefined;
+  private game: GameId = 'let-them-cook';
   private readonly seats: Seat[] = Array.from({ length: SEAT_COUNT }, (_, viber) => ({
     viber, session: null, connected: false, ready: false, lastSequence: -1, receivedAt: -Infinity, applied: null,
   }));
@@ -45,7 +50,7 @@ export class MayhemRoom extends Room {
   private events: MatchView['events'][number][] = [];
   private admitted = false;
 
-  async onCreate() {
+  async onCreate(options: { game?: unknown } = {}) {
     const now = performance.now();
     while (roomCreations.length && roomCreations[0] <= now - ROOM_CREATION_WINDOW_MS) roomCreations.shift();
     if (activeRooms >= MAX_ROOMS || roomCreations.length >= MAX_ROOMS * 2) {
@@ -55,15 +60,24 @@ export class MayhemRoom extends Room {
     roomCreations.push(now);
     this.admitted = true;
     try {
+      if (options.game === 'pizza-party') {
+        this.game = options.game;
+        this.pizza = new PizzaRound();
+      }
       this.roomId = randomBytes(9).toString('base64url');
       await this.setPrivate(true);
       this.onMessage('sync', client => this.sync(client));
-      this.onMessage(ROOM_PING, () => true);
+      this.onMessage(ROOM_PING, () => this.pizza && this.phase === 'playing' && !this.pizzaLoading
+        ? { round: this.round, tick: this.pizza.match.tick + (this.elapsed + performance.now() - this.lastUpdate) / TICK_MS }
+        : true);
       this.onMessage('viber', (client, value: unknown) => this.selectViber(client, value));
       this.onMessage('ready', (client, value: unknown) => this.ready(client, value));
       this.onMessage('start', client => this.startRound(client));
       this.onMessage('waiting', client => this.openWaitingRoom(client));
       this.onMessage('input', (client, value: unknown) => this.acceptInput(client, value));
+      this.onMessage('pizza-loaded', (client, round: unknown) => {
+        if (round === this.round && this.pizzaLoading) this.pizzaLoading.seats.delete(this.indexOf(client));
+      });
       this.setSimulationInterval(() => this.advance(), TICK_MS);
     } catch (error) {
       this.releaseAdmission();
@@ -81,8 +95,8 @@ export class MayhemRoom extends Room {
     activeRooms--;
   }
 
-  onAuth() {
-    return this.phase === 'waiting';
+  onAuth(_client: Client, options: { pizza?: unknown } = {}) {
+    return this.phase === 'waiting' && (this.game !== 'pizza-party' || options.pizza === true);
   }
 
   onJoin(client: Client, options: { viber?: unknown } = {}) {
@@ -106,6 +120,7 @@ export class MayhemRoom extends Room {
     const seat = this.seats[index];
     seat.connected = seat.ready = false;
     seat.input = undefined;
+    this.pizza?.clear(index);
     this.publishRoom();
     void this.allowReconnection(client, RECONNECT_SECONDS).catch(() => {
       if (seat.session === client.sessionId && !seat.connected) this.release(index);
@@ -133,6 +148,8 @@ export class MayhemRoom extends Room {
     const seat = this.seats[index];
     seat.connected = seat.ready = false;
     seat.input = undefined;
+    this.pizza?.clear(index);
+    this.pizzaLoading?.seats.delete(index);
     seat.session = null;
     if (index === this.host) {
       this.host = this.seats.findIndex(item => item.connected);
@@ -143,7 +160,7 @@ export class MayhemRoom extends Room {
 
   private roomView(you: number): RoomView {
     return {
-      code: this.roomId, phase: this.phase, round: this.round, host: this.host, you,
+      code: this.roomId, game: this.game, phase: this.phase, round: this.round, host: this.host, you,
       seats: this.seats.map((seat, index) => ({
         viber: seat.viber, ready: seat.ready,
         kind: seat.connected ? 'human' : seat.session !== null ? 'away' :
@@ -163,7 +180,9 @@ export class MayhemRoom extends Room {
     const index = this.indexOf(client);
     if (index < 0) return;
     client.send('room', this.roomView(index));
-    if (this.phase !== 'waiting') client.send('snapshot', this.snapshot([]));
+    if (this.phase === 'waiting') return;
+    if (this.pizza) client.send('pizza-snapshot', this.pizzaSnapshot(false));
+    else client.send('snapshot', this.snapshot([]));
   }
 
   private assignViber(index: number, viber: number) {
@@ -216,10 +235,17 @@ export class MayhemRoom extends Room {
       seat.receivedAt = -Infinity;
       seat.applied = null;
     }
-    this.match.start(randomBytes(4).readUInt32LE(), humans);
+    const seed = randomBytes(4).readUInt32LE();
+    if (this.pizza) {
+      this.pizza.start(seed, humans, this.round);
+      // Each browser finishes constructing and drawing the kitchen before the round clock runs.
+      this.pizzaLoading = { seats: new Set(humans), until: performance.now() + PIZZA_LOAD_TIMEOUT_MS };
+    }
+    else this.match.start(seed, humans);
     void this.lock();
     this.publishRoom();
-    this.broadcast('snapshot', this.snapshot([]));
+    if (this.pizza) this.broadcast('pizza-snapshot', this.pizzaSnapshot(false));
+    else this.broadcast('snapshot', this.snapshot([]));
   }
 
   private openWaitingRoom(client: Client) {
@@ -238,12 +264,18 @@ export class MayhemRoom extends Room {
     if (!seat.connected || input.round !== this.round || !numberInRange(input.sequence, Number.MAX_SAFE_INTEGER) ||
       input.sequence <= seat.lastSequence || typeof input.x !== 'number' || typeof input.z !== 'number' ||
       !Number.isFinite(input.x) || !Number.isFinite(input.z)) return;
+    if (this.pizza && !numberInRange(input.tick, Number.MAX_SAFE_INTEGER)) return;
     seat.lastSequence = input.sequence;
     seat.receivedAt = performance.now();
     seat.input = {
       round: this.round, sequence: input.sequence,
       x: Math.max(-1, Math.min(1, input.x)), z: Math.max(-1, Math.min(1, input.z)),
     };
+    if (this.pizza) this.pizza.queue(index, input.tick!, { x: seat.input.x, z: seat.input.z });
+  }
+
+  private pizzaSnapshot(events: boolean) {
+    return this.pizza!.snapshot(this.round, this.seats.map(seat => seat.lastSequence), events);
   }
 
   private snapshot(events: MatchView['events']): Snapshot {
@@ -263,8 +295,31 @@ export class MayhemRoom extends Room {
   private advance() {
     if (this.phase !== 'playing') return;
     const now = performance.now();
+    if (this.pizzaLoading) {
+      if (this.pizzaLoading.seats.size === 0 || now >= this.pizzaLoading.until) this.pizzaLoading = undefined;
+      this.elapsed = 0;
+      this.lastUpdate = now;
+      return;
+    }
     this.elapsed += now - this.lastUpdate;
     this.lastUpdate = now;
+    if (this.pizza) {
+      const match = this.pizza.match;
+      for (let n = 0; this.elapsed >= TICK_MS && n < MAX_CATCH_UP_STEPS; n++) {
+        this.elapsed -= TICK_MS;
+        this.pizza.step();
+        if (match.phase === 'over') {
+          this.phase = 'results';
+          this.publishRoom();
+          break;
+        }
+      }
+      if (this.phase === 'results' || match.tick - this.lastSnapshot >= SNAPSHOT_TICKS) {
+        this.lastSnapshot = match.tick;
+        this.broadcast('pizza-snapshot', this.pizzaSnapshot(true));
+      }
+      return;
+    }
     const inputs = this.seats.map(seat =>
       seat.connected && now - seat.receivedAt < STALE_INPUT_MS ? seat.input : undefined);
     for (let n = 0; this.elapsed >= TICK_MS && n < MAX_CATCH_UP_STEPS; n++) {

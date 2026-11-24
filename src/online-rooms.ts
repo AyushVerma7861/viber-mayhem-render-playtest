@@ -2,7 +2,8 @@ import './online-rooms.css';
 import { Client, MatchMakeError } from '@colyseus/sdk';
 import type { Room } from '@colyseus/sdk';
 import { RECONNECT_SECONDS, ROOM_PING, ROOM_SERVER_BUSY, ROOM_TYPE } from './online-protocol.ts';
-import type { RoomView, Snapshot } from './online-protocol.ts';
+import type { GameId, RoomView, Snapshot } from './online-protocol.ts';
+import type { PizzaClock, PizzaSnapshot } from '../pizza-party/network-state.ts';
 import { parseRegionDirectory, preferredRegion, readRoomRoute } from './online-regions.ts';
 import type { GameRegion, RegionDirectory, RoomRoute } from './online-regions.ts';
 import { pingQuality, pingText } from './ping-indicator.ts';
@@ -21,7 +22,8 @@ const SYNC_ATTEMPTS = 5;
 export const onlineEnabled = document.documentElement.hasAttribute('data-online');
 
 type Callbacks = {
-  cover: string;
+  cover(game: GameId): string;
+  game(): GameId;
   ping(reading: PingReading): void;
   selected(): Viber;
   activate(): void;
@@ -29,9 +31,22 @@ type Callbacks = {
   toggleFullscreen(): void;
   room(view: RoomView): void;
   snapshot(snapshot: Snapshot): void;
+  pizzaSnapshot(snapshot: PizzaSnapshot, clock?: PizzaClock): void;
+  panel(open: boolean): void;
   connection(message: string): void;
   actionNotice(message: string): void;
   left(): void;
+};
+
+const games = {
+  'let-them-cook': {
+    title: 'Let Them Cook',
+    guide: 'Bump a rival to pass the cooker before it vents. Dodge the trolleys.',
+  },
+  'pizza-party': {
+    title: 'Pizza Party',
+    guide: 'Race for toppings at the marked tray spots. Serve the two on your ticket at your counter.',
+  },
 };
 
 function updatePing(label: HTMLElement, milliseconds: number | null | undefined, unknown: string): void {
@@ -91,7 +106,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
           <p class="online-pick-hint" data-room-pick>Tap a bot portrait to switch Vibers.</p>
           <details class="online-guide" data-room-guide>
             <summary>How to play</summary>
-            <p>Use WASD or arrow keys, or drag left of center on touch. Bump a rival to pass the cooker before it vents. Dodge the trolleys.</p>
+            <p data-game-guide></p>
           </details>
         </div>
         <div class="online-invite">
@@ -138,7 +153,6 @@ export function createOnlineRooms(callbacks: Callbacks) {
   const retryPings = get<HTMLButtonElement>('[data-retry-pings]');
   const retrySync = get<HTMLButtonElement>('[data-retry-sync]');
   const confirm = get('[data-keep-seat]').closest<HTMLElement>('section')!;
-  get<HTMLImageElement>('.online-hero img').src = callbacks.cover;
   shareButton.hidden = typeof navigator.share !== 'function';
   let room: Room | undefined;
   let view: RoomView | undefined;
@@ -153,6 +167,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
   let lastInputAt = -Infinity;
   let lastInput: Vec = { x: 0, z: 0 };
   let frameTick = -1;
+  let pizzaClock: (PizzaClock & { rtt: number }) | undefined;
+  let shownGame: GameId | undefined;
   let connectionMessage = '';
   let reconnectTimer: number | undefined;
   let displayNoticeTimer: number | undefined;
@@ -311,9 +327,8 @@ export function createOnlineRooms(callbacks: Callbacks) {
     const reading: PingReading = reconnecting ? 'reconnecting' :
       activePing === null ? 'no-reply' : activePing ?? 'checking';
     callbacks.ping(reading);
-    const subtitle = activeRegion
-      ? activeRegion.label + ' · ' + (typeof reading === 'number' ? 'Ping ' : '') + pingText(reading)
-      : 'LET THEM COOK';
+    const title = games[view?.game ?? callbacks.game()].title;
+    const subtitle = activeRegion ? title + ' · ' + activeRegion.label + ' · ' + pingText(reading) : title;
     const label = get('[data-room-region]');
     if (label.textContent !== subtitle) label.textContent = subtitle;
   }
@@ -325,9 +340,17 @@ export function createOnlineRooms(callbacks: Callbacks) {
     const started = performance.now();
     let ping: number | null = null;
     try {
-      await joined.request(ROOM_PING, undefined, { timeout: PING_TIMEOUT });
+      const reply: unknown = await joined.request(ROOM_PING, undefined, { timeout: PING_TIMEOUT });
       const elapsed = performance.now() - started;
       if (elapsed <= PING_TIMEOUT) ping = Math.round(elapsed);
+      if (version === roomPingVersion && view?.game === 'pizza-party' && view.phase === 'playing' &&
+          reply && typeof reply === 'object' && 'round' in reply && reply.round === view.round &&
+          'tick' in reply && typeof reply.tick === 'number' && Number.isFinite(reply.tick)) {
+        const at = performance.timeOrigin + started + elapsed / 2;
+        if (!pizzaClock || elapsed <= pizzaClock.rtt + 2 || at - pizzaClock.at > 4500) {
+          pizzaClock = { tick: reply.tick, at, rtt: elapsed };
+        }
+      }
     } catch { /* A slow or interrupted reply is replaced by the next measurement. */ }
     if (version !== roomPingVersion) return;
     activePing = ping;
@@ -370,6 +393,12 @@ export function createOnlineRooms(callbacks: Callbacks) {
     party.hidden = !view || !confirm.hidden;
     get('[data-room-notice]').hidden = !confirm.hidden;
     get('h2').textContent = view ? 'Private room' : 'Online Rooms';
+    const game = view?.game ?? callbacks.game();
+    if (shownGame !== game) {
+      shownGame = game;
+      get<HTMLImageElement>('.online-hero img').src = callbacks.cover(game);
+      get('[data-game-guide]').textContent = 'Use WASD or arrows, or drag on the left on touch. ' + games[game].guide;
+    }
     closeButton.hidden = view?.phase === 'waiting' && confirm.hidden;
     closeButton.setAttribute('aria-label', view ? 'Close room panel' :
       busy || room ? 'Cancel room connection' : 'Close Online Rooms');
@@ -469,16 +498,22 @@ export function createOnlineRooms(callbacks: Callbacks) {
     window.clearTimeout(regionPingTimer);
     window.clearTimeout(displayNoticeTimer);
     get('[data-display-notice]').textContent = '';
-    if (dialog.open) dialog.close();
+    if (dialog.open) {
+      dialog.close();
+      callbacks.panel(false);
+    }
   }
 
   function open() {
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) {
+      dialog.showModal();
+      callbacks.panel(true);
+    }
     render();
     if (!room && !busy) void loadDirectory().then(scheduleRegionPing);
   }
 
-  function attach(joined: Room, region: GameRegion) {
+  function attach(joined: Room, region: GameRegion, requestedGame?: GameId) {
     room = joined;
     activeRegion = region;
     connected = false;
@@ -489,18 +524,30 @@ export function createOnlineRooms(callbacks: Callbacks) {
     frameTick = -1;
     saveSeat(joined, region);
     updateAddress(joined.roomId);
-    joined.onMessage('room', (state: RoomView) => {
+    joined.onMessage('room', (received: RoomView) => {
       if (room !== joined) return;
+      const state = { ...received, game: received.game ?? 'let-them-cook' };
+      if (requestedGame === 'pizza-party' && state.game !== requestedGame) {
+        forget();
+        notice('Pizza Party is still being updated in this region. Choose another region or try again shortly.');
+        render();
+        scheduleRegionPing();
+        void joined.leave().catch(() => {});
+        return;
+      }
       if (state.phase !== view?.phase) notice('');
-      if (view?.round !== state.round) {
+      const newRound = view?.round !== state.round;
+      if (newRound) {
         sequence = 0;
         lastInputAt = -Infinity;
         frameTick = -1;
+        pizzaClock = undefined;
       }
       view = state;
       if (awaitingSnapshot && state.phase === 'waiting') finishSync();
       else render();
       callbacks.room(state);
+      if (newRound && state.game === 'pizza-party' && state.phase === 'playing') resetRoomPing();
     });
     joined.onMessage('notice', (message: string) => {
       if (room !== joined) return;
@@ -515,10 +562,19 @@ export function createOnlineRooms(callbacks: Callbacks) {
       if (awaitingSnapshot) finishSync();
       callbacks.snapshot(snapshot);
     });
+    joined.onMessage('pizza-snapshot', (snapshot: PizzaSnapshot) => {
+      if (room !== joined || view?.game !== 'pizza-party' || snapshot.round !== view.round ||
+          snapshot.view.tick < frameTick || snapshot.view.tick === frameTick && !awaitingSnapshot) return;
+      frameTick = snapshot.view.tick;
+      sequence = Math.max(sequence, snapshot.acknowledgments[view.you] + 1);
+      if (awaitingSnapshot) finishSync();
+      callbacks.pizzaSnapshot(snapshot, pizzaClock);
+    });
     joined.onDrop(() => {
       if (room !== joined) return;
       connected = false;
       reconnecting = true;
+      pizzaClock = undefined;
       resetRoomPing();
       awaitingSnapshot = false;
       stopSync();
@@ -593,6 +649,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
     stopSync();
     room = undefined;
     view = undefined;
+    pizzaClock = undefined;
     connected = false;
     reconnecting = false;
     activeRegion = undefined;
@@ -659,16 +716,17 @@ export function createOnlineRooms(callbacks: Callbacks) {
       }
       if (current !== attempt) return;
       notice(reconnect ? 'Rejoining your room…' : route ? 'Joining room…' : 'Creating room…');
+      const requestedGame = input === undefined ? callbacks.game() : undefined;
       let joined: Room | undefined;
       if (reconnect) {
         joined = await reclaimSeat(client, reconnect, current);
       } else if (route) {
-        joined = await client.joinById(route.code, { viber });
+        joined = await client.joinById(route.code, { viber, pizza: true });
       } else {
-        joined = await client.create(ROOM_TYPE, { viber });
+        joined = await client.create(ROOM_TYPE, { viber, game: requestedGame, pizza: true });
       }
       if (!joined) return;
-      if (current === attempt) attach(joined, region);
+      if (current === attempt) attach(joined, region, requestedGame);
       else void joined.leave().catch(() => {});
     } catch (error) {
       if (current !== attempt) return;
@@ -757,7 +815,7 @@ export function createOnlineRooms(callbacks: Callbacks) {
     if (!view || !connected) return;
     const url = invite(view.code);
     try {
-      await navigator.share({ title: 'Let Them Cook · Viber Mayhem', text: 'Join my private room', url });
+      await navigator.share({ title: games[view.game].title + ' · Viber Mayhem', text: 'Join my private room', url });
     } catch (error) {
       if (view && invite(view.code) === url && !(error instanceof DOMException && error.name === 'AbortError')) revealInvite(url);
     }
@@ -817,6 +875,14 @@ export function createOnlineRooms(callbacks: Callbacks) {
     get state() { return view; },
     get connected() { return connected; },
     get showing() { return dialog.open; },
+    get pizzaRematch() {
+      const host = view?.you === view?.host;
+      const ready = view?.seats[view.you].ready;
+      return {
+        label: host ? 'Rematch' : ready ? 'Cancel ready' : 'Ready for rematch',
+        enabled: connected && view?.phase === 'results' && (!host || !waitingFor(view)),
+      };
+    },
     waitingFor,
     startFromLink() {
       const code = new URLSearchParams(location.search).get('room');
@@ -841,6 +907,13 @@ export function createOnlineRooms(callbacks: Callbacks) {
       const sent = sequence++;
       message('input', { round: view.round, sequence: sent, ...vec });
       return sent;
+    },
+    sendPizzaInput(round: number, tick: number, direction: Vec) {
+      if (!connected || view?.game !== 'pizza-party' || view.round !== round || view.phase !== 'playing') return;
+      message('input', { round, sequence: sequence++, tick, ...direction });
+    },
+    pizzaLoaded(round: number) {
+      if (view?.game === 'pizza-party' && view.round === round && view.phase === 'playing') message('pizza-loaded', round);
     },
   };
 }

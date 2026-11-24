@@ -9,6 +9,7 @@ export const SNAPSHOT_TICKS = 3;
 export const ROOM_CODE = /^[A-Za-z0-9_-]{12}$/;
 
 export type RoomPhase = 'waiting' | 'playing' | 'results';
+export type GameId = 'let-them-cook' | 'pizza-party';
 export interface RoomSeat {
   viber: number;
   kind: 'human' | 'bot' | 'away' | 'left';
@@ -16,6 +17,7 @@ export interface RoomSeat {
 }
 export interface RoomView {
   code: string;
+  game: GameId;
   phase: RoomPhase;
   round: number;
   host: number;
@@ -35,4 +37,5 @@ export interface AppliedInput {
 export interface OnlineInput extends Vec {
   round: number;
   sequence: number;
+  tick?: number;
 }

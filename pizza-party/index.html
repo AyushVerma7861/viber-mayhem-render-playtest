@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#25332b">
+  <title>Pizza Party · Viber Mayhem</title>
+  <script type="module" src="./main.ts"></script>
+</head>
+<body>
+  <main id="pizza-app" data-phase="menu">
+    <canvas id="kitchen" aria-label="Pizza Party kitchen"></canvas>
+    <div id="world-hud" aria-hidden="true">
+      <div id="orders"></div>
+      <div id="you-marker">YOU</div>
+    </div>
+    <div id="touch" aria-label="Drag to move"><div id="stick"><i></i></div></div>
+    <header class="matchbar">
+      <div id="scoreboard" aria-label="Pizza scores"></div>
+      <div id="timer" role="timer" aria-label="Round time remaining"><span>TIME</span> <b id="clock">1:25</b></div>
+      <div class="actions">
+        <span id="pizza-ping" title="Round-trip time to the match server" hidden>…</span>
+        <button id="pizza-room" class="hud-button" type="button" hidden>Room</button>
+        <button id="mute" type="button" class="hud-button sound-icon" aria-label="Sound on" aria-pressed="true" title="Sound on"></button>
+        <button id="fullscreen" type="button" class="hud-button fullscreen-icon" aria-label="Fullscreen" aria-pressed="false" title="Fullscreen"></button>
+        <button id="pause" type="button" class="hud-button pause-icon" aria-label="Pause" title="Pause" disabled></button>
+      </div>
+    </header>
+    <output id="carry" hidden></output>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+    <div id="countdown" aria-hidden="true" hidden></div>
+    <div id="display-note" role="status" hidden></div>
+    <div id="pizza-connection" role="status" hidden></div>
+    <section id="overlay" aria-labelledby="panel-title">
+      <div id="panel">
+        <img id="chef-mark" src="./shared/assets/chef-mark.png" alt="" width="38" height="38">
+        <h1 id="panel-title">Pizza Party</h1>
+        <p id="panel-copy">Use the marked spots to grab toppings as the trays refill. Bring two requested toppings to your counter.</p>
+        <div id="results" aria-label="Final scores" hidden></div>
+        <div class="panel-actions">
+          <button id="primary" type="button">Play</button>
+          <button id="secondary" type="button" hidden>Restart</button>
+          <button id="back" type="button" hidden>Games</button>
+        </div>
+        <div id="sound-settings" aria-label="Audio settings" hidden>
+          <label for="music-level">Music</label>
+          <input id="music-level" type="range" min="0" max="100" step="1">
+          <output id="music-value" for="music-level"></output>
+          <label for="effects-level">Effects</label>
+          <input id="effects-level" type="range" min="0" max="100" step="1">
+          <output id="effects-value" for="effects-level"></output>
+        </div>
+        <span id="input-hint">WASD or arrows to move</span>
+      </div>
+    </section>
+    <pre id="debug" hidden></pre>
+  </main>
+</body>
+</html>

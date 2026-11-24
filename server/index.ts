@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Server } from '@colyseus/core';
 import { WebSocketTransport } from '@colyseus/ws-transport';
 import { ROOM_TYPE } from '../src/online-protocol.ts';
@@ -10,6 +10,8 @@ const output = new URL('../online-dist/', import.meta.url);
 const html = readFileSync(new URL('index.html', output), 'utf8').replace('<html ', '<html data-online ');
 const outputPath = fileURLToPath(output);
 const assets = fileURLToPath(new URL('assets/', output));
+const pizzaHtml = readFileSync(new URL('pizza/index.html', output), 'utf8');
+const pizzaAssets = fileURLToPath(new URL('pizza/assets/', output));
 const directory = process.env.MAYHEM_REGIONS
   ? parseRegionDirectory(JSON.parse(process.env.MAYHEM_REGIONS))
   : undefined;
@@ -20,11 +22,13 @@ const contentSecurityPolicy = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
+  "frame-src 'self'",
+  "frame-ancestors 'self'",
   ["connect-src 'self'", ...connections].join(' '),
   "object-src 'none'",
   "base-uri 'none'",
 ].join('; ');
-const server = new Server({
+export const server = new Server({
   transport: new WebSocketTransport({ maxPayload: 4096 }),
   express(app) {
     app.disable('x-powered-by');
@@ -35,6 +39,10 @@ const server = new Server({
     app.get('/', (_request, response) => response.set({
       'Cache-Control': 'no-store', 'Content-Security-Policy': contentSecurityPolicy,
     }).type('html').send(html));
+    app.get('/pizza/', (_request, response) => response.set({
+      'Cache-Control': 'no-store', 'Content-Security-Policy': contentSecurityPolicy,
+    }).type('html').send(pizzaHtml));
+    app.get('/favicon.ico', (_request, response) => response.sendFile('favicon.png', { root: outputPath, maxAge: '1d' }));
     app.get('/health', (_request, response) => response.json({ ok: true }));
     app.get('/regions.json', (_request, response) => response.set('Cache-Control', 'no-store').json(directory ?? null));
     app.get('/third-party-notices', (_request, response) =>
@@ -47,10 +55,20 @@ const server = new Server({
       }
       response.sendFile(name, { root: assets, maxAge: '1y', immutable: true });
     });
+    app.get('/pizza/assets/:name', (request, response) => {
+      const name = request.params.name;
+      if (!/^[\w.-]+\.(js|css|png|webp|flac|mp3)$/.test(name)) {
+        response.sendStatus(404);
+        return;
+      }
+      response.sendFile(name, { root: pizzaAssets, maxAge: '1y', immutable: true });
+    });
   },
 });
 server.define(ROOM_TYPE, MayhemRoom);
-const host = process.env.HOST || '127.0.0.1';
-const port = Number(process.env.PORT || 2567);
-await server.listen(port, host);
-console.log('Viber Mayhem online preview listening on http://' + host + ':' + port);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const host = process.env.HOST || '127.0.0.1';
+  const port = Number(process.env.PORT || 2567);
+  await server.listen(port, host);
+  console.log('Viber Mayhem listening on http://' + host + ':' + port);
+}

@@ -8,14 +8,18 @@ import type { AudioChannel } from './hub.ts';
 import { createOnlineRooms, onlineEnabled } from './online-rooms.ts';
 import { OnlineMovement } from './online-movement.ts';
 import type { RoomView, Snapshot } from './online-protocol.ts';
+import type { PizzaClock, PizzaSnapshot } from '../pizza-party/network-state.ts';
+import { createPizzaScreen } from './pizza-screen.ts';
 import { PartyAudio } from './party-audio.ts';
 import { createPingIndicator, previewPing } from './ping-indicator.ts';
+import type { PingReading } from './ping-indicator.ts';
 import { KITCHEN_ARENA } from './arena.ts';
 import { CAST, FUSE_TICKS, HZ, Match, OFFLINE_SEAT, STEP } from './simulation.ts';
 import type { MatchView, Vec } from './simulation.ts';
 import { YardView } from './scene.ts';
 import { VIBERS, viberParty } from './vibers.ts';
 import kitchenCover from './assets/let-them-cook-cover.webp';
+import pizzaCover from './assets/pizza-party-cover.png';
 
 function element<T extends HTMLElement = HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -138,6 +142,19 @@ let online: ReturnType<typeof createOnlineRooms> | undefined;
 let networkFrame: { round: number; view: MatchView; time: number; span: number; gapMs: number } | undefined;
 const onlineMovement = new OnlineMovement();
 let onlineConnectionMessage = '';
+let pizzaRound: number | undefined;
+let roomPing: PingReading = 'checking';
+const pizzaScreen = createPizzaScreen(message => {
+  if (message.type === 'fullscreen') void fullscreen.toggle();
+  if (message.type === 'back' && pizzaRound === undefined) returnToHub();
+  if (message.type === 'room' && pizzaRound !== undefined) online?.open();
+  if (message.type === 'rematch' && pizzaRound !== undefined) online?.rematch();
+  if (message.type === 'loaded' && pizzaRound === message.round) online?.pizzaLoaded(message.round);
+  if (message.type === 'volume') setVolume(message.channel, message.level);
+  if (message.type === 'input' && pizzaRound === message.round) {
+    online?.sendPizzaInput(message.round, message.tick, message.direction);
+  }
+});
 function openArena(): void {
   if (yard) return;
   try {
@@ -466,10 +483,60 @@ function returnToHub(): void {
   onlineMovement.reset();
   if (networkFrame) online?.sendInput({ x: 0, z: 0 }, performance.now());
   shell.hidden = true;
+  pizzaScreen.close();
+  pizzaRound = undefined;
   document.title = 'Viber Mayhem';
   hub.show(true);
   syncAudioMix();
   window.scrollTo(0, 0);
+}
+
+function openPizza(you: number, roster: readonly number[], round?: number): void {
+  cancelAnimationFrame(arenaFrame);
+  clearInput();
+  inHub = false;
+  networkFrame = undefined;
+  hub?.hide();
+  shell.hidden = true;
+  pizzaRound = round;
+  document.title = 'Pizza Party · Viber Mayhem';
+  pizzaScreen.open(you, roster, round);
+  pizzaScreen.send({ type: 'fullscreen', active: fullscreen.active });
+  pizzaScreen.send({ type: 'start', music: musicVolume / 100, effects: effectsVolume / 100 });
+  syncAudioMix();
+}
+
+function playPizzaFromHub(): void {
+  activateMatch();
+  if (!canPlayInLandscape()) return;
+  openPizza(0, viberParty(selected).map(viber => VIBERS.indexOf(viber)));
+}
+
+function syncPizzaRoom(): void {
+  if (pizzaRound === undefined || !online) return;
+  const rematch = online.pizzaRematch;
+  pizzaScreen.send({
+    type: 'room', connected: online.connected, blocked: online.showing, ping: roomPing,
+    message: onlineConnectionMessage, rematch: rematch.label, canRematch: rematch.enabled,
+  });
+}
+
+function receivePizzaSnapshot(snapshot: PizzaSnapshot, clock?: PizzaClock): void {
+  const room = online?.state;
+  if (!room || room.round !== snapshot.round) return;
+  const at = performance.timeOrigin + performance.now();
+  if (pizzaRound !== snapshot.round) {
+    online?.close();
+    const you = snapshot.spawnSeats.indexOf(room.you);
+    const roster = snapshot.spawnSeats.map(seat => room.seats[seat].viber);
+    openPizza(you, roster, snapshot.round);
+    syncPizzaRoom();
+  }
+  const estimated = typeof roomPing === 'number' ? roomPing / 2 : 0;
+  pizzaScreen.send({
+    type: 'state', snapshot, at,
+    clock: clock ?? { tick: snapshot.view.tick, at: at - estimated },
+  });
 }
 
 function showOnlineRound(): void {
@@ -822,6 +889,7 @@ const fullscreen = createGameFullscreen(document.documentElement, full => {
   landscapeFullscreen.textContent = fullscreenButton.textContent;
   hub?.setFullscreen(full);
   online?.setFullscreen(full);
+  pizzaScreen.send({ type: 'fullscreen', active: full });
   releaseControls();
 }, message => {
   if (landscapePrompt.open) landscapeNotice.textContent = message.replace(/ ?Rotate your device for landscape\.$/, '');
@@ -847,12 +915,13 @@ function closeLandscapePrompt(): void {
   syncAudioMix();
 }
 function canPlayInLandscape(): boolean {
-  if (!needsLandscape()) return true;
+  if (!needsLandscape() || pizzaScreen.showing) return true;
   openLandscapePrompt(landscapeDuringPlay);
   return false;
 }
 function syncLandscape(): void {
   releaseControls();
+  if (pizzaScreen.showing) return;
   if (!needsLandscape()) {
     closeLandscapePrompt();
     if (pausedForLandscape) {
@@ -908,7 +977,7 @@ document.addEventListener('visibilitychange', () => {
   else setPaused(true);
 });
 window.addEventListener('keydown', event => {
-  if (inHub || landscapePrompt.open || online?.showing || event.altKey || event.ctrlKey || event.metaKey) return;
+  if (inHub || pizzaScreen.showing || landscapePrompt.open || online?.showing || event.altKey || event.ctrlKey || event.metaKey) return;
   const phase = networkFrame?.view.phase ?? match.phase;
   if (movement[event.code] && phase === 'play' && !paused && !needsLandscape() && (!networkFrame || online?.connected)) {
     event.preventDefault();
@@ -929,21 +998,34 @@ window.addEventListener('keydown', event => {
 window.addEventListener('keyup', event => held.delete(event.code));
 if (usesHub) {
   if (onlineEnabled) online = createOnlineRooms({
-    cover: kitchenCover,
-    ping: showPing,
+    cover: game => game === 'pizza-party' ? pizzaCover : kitchenCover,
+    game: () => hub?.game ?? 'let-them-cook',
+    ping(reading) {
+      roomPing = reading;
+      showPing(reading);
+      syncPizzaRoom();
+    },
     selected: () => selected,
     activate: activateMatch,
     canPlay: canPlayInLandscape,
     toggleFullscreen: fullscreen.toggle,
     room(state) {
-      if (state.phase !== 'waiting' || !networkFrame) return;
+      hub?.selectGame(state.game);
+      syncPizzaRoom();
+      if (state.phase !== 'waiting' || (!networkFrame && pizzaRound === undefined)) return;
       if (!inHub) returnToHub();
       networkFrame = undefined;
       online?.open();
     },
     snapshot: receiveSnapshot,
+    pizzaSnapshot: receivePizzaSnapshot,
+    panel(open) {
+      syncPizzaRoom();
+      if (!open) pizzaScreen.focus();
+    },
     connection(message) {
       onlineConnectionMessage = message;
+      syncPizzaRoom();
       if (message && !online?.connected) releaseControls();
     },
     actionNotice: message => announce(message, performance.now(), 2400),
@@ -964,6 +1046,16 @@ if (usesHub) {
         'The Viber holding the cooker when it vents is out. The last Viber wins.',
       ],
       start: playFromHub,
+    }, {
+      id: 'pizza-party',
+      title: 'Pizza Party',
+      cover: pizzaCover,
+      rules: [
+        'Pick up toppings with your plate at the marked tray spots.',
+        'The closest plate gets the topping when the tray refills. Bump rivals to take their spot.',
+        'Bring both requested toppings to your counter. Most pizzas wins.',
+      ],
+      start: playPizzaFromHub,
     }],
     selectViber(viber) {
       selected = viber;

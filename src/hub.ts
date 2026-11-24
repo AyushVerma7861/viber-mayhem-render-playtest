@@ -1,6 +1,7 @@
 import './hub.css';
 import { VIBERS } from './vibers.ts';
 import type { Viber } from './vibers.ts';
+import type { GameId } from './online-protocol.ts';
 import { ViberPreview } from './viber-preview.ts';
 import chefMark from './assets/chef-mark.png?inline';
 
@@ -33,7 +34,7 @@ export function readHubPreferences() {
 }
 
 type MiniGame = {
-  id: string;
+  id: GameId;
   title: string;
   cover: string;
   rules: readonly string[];
@@ -363,6 +364,13 @@ export function createHub(options: HubOptions) {
   syncGame();
   syncViber();
   return {
+    get game() { return game.id; },
+    selectGame(id: GameId) {
+      const selectedGame = options.games.find(candidate => candidate.id === id);
+      if (!selectedGame || game === selectedGame) return;
+      game = selectedGame;
+      syncGame();
+    },
     show(focus = false) {
       root.hidden = false;
       setPanel(undefined, undefined, false);

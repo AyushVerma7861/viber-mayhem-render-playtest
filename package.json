@@ -9,10 +9,10 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "npm run build:online",
-    "build:online": "tsc --noEmit && vite build --mode online --outDir online-dist",
+    "build:online": "tsc --noEmit && tsc --project pizza-party/tsconfig.json --noEmit && node build.mjs",
     "online": "node server/index.ts",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "node --test test/simulation.test.ts test/kitchen.test.ts test/frame-clock.test.ts test/online-movement.test.ts test/online-regions.test.ts"
+    "test": "node --test test/simulation.test.ts test/kitchen.test.ts test/frame-clock.test.ts test/online-movement.test.ts test/online-regions.test.ts test/pizza-room.test.ts pizza-party/simulation.test.ts pizza-party/contact.test.ts pizza-party/opening-orders.test.ts"
   },
   "dependencies": {
     "@colyseus/core": "0.18.29",
